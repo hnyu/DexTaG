@@ -15,6 +15,7 @@ class FlatScene(BaseSimScene):
         show_fps: bool = False,
         n_envs_per_row: int | None = None,
         env_spacing: tuple[float, float] = (1.0, 1.0),
+        use_batch_renderer: bool = True,
     ) -> None:
         super().__init__()
         #
@@ -29,13 +30,20 @@ class FlatScene(BaseSimScene):
             viewer_options=args.viewer_options,
             show_FPS=show_fps,
             show_viewer=show_viewer,
-            renderer=gs.options.renderers.BatchRenderer(use_rasterizer=True),
+            # BatchRenderer needs every camera at the same resolution; the plain Rasterizer
+            # allows a high-res recording camera alongside the small wrist camera.
+            renderer=(
+                gs.options.renderers.BatchRenderer(use_rasterizer=True)
+                if use_batch_renderer
+                else gs.options.renderers.Rasterizer()
+            ),
         )
-        # BatchRenderer requires at least one light
-        self._scene.add_light(
-            pos=(0, 0, 3), dir=(0, 0, -1), color=(1, 1, 1),
-            directional=True, intensity=1.0,
-        )
+        # BatchRenderer requires at least one light (the Rasterizer uses vis_options.lights)
+        if use_batch_renderer:
+            self._scene.add_light(
+                pos=(0, 0, 3), dir=(0, 0, -1), color=(1, 1, 1),
+                directional=True, intensity=1.0,
+            )
 
         self._scene.add_entity(
             gs.morphs.Box(

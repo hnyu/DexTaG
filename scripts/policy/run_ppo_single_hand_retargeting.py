@@ -38,6 +38,7 @@ def create_gs_env(
     device: str = "cuda",
     args: Any = None,
     eval_mode: bool = False,
+    record_video: bool = False,
 ) -> Any:
     """Instantiate the env class named by args.env_name."""
     if torch.cuda.is_available() and device == "cuda":
@@ -54,6 +55,7 @@ def create_gs_env(
         show_viewer=show_viewer,
         device=device_tensor,  # type: ignore
         eval_mode=eval_mode,
+        **({"record_video": True} if record_video else {}),
     )
 
 
@@ -95,6 +97,7 @@ def evaluate_policy(
     algo_cfg: Any = None,
     save_trajectory: bool = False,
     num_runs_per_traj: int = 5,
+    save_video: bool = False,
 ) -> None:
     """Evaluate the policy."""
     print("=" * 80)
@@ -162,6 +165,7 @@ def evaluate_policy(
         device=device,
         args=env_args,
         eval_mode=True,
+        record_video=save_video,
     )
 
     wrapped_env = GenesisEnvWrapper(env, device=env.device)
@@ -233,6 +237,15 @@ def evaluate_policy(
             }
             traj_episode_idx = 0
 
+        # Video recording: one mp4 per episode, from the env's offscreen camera
+        if save_video:
+            video_camera = wrapped_env.env._video_camera
+            video_fps = round(1.0 / wrapped_env.env._scene.scene.dt)
+            video_save_dir = Path(exp_dir) / "videos" / f"checkpoint_{num_ckpt:04d}"
+            video_save_dir.mkdir(parents=True, exist_ok=True)
+            video_episode_idx = 0
+            video_camera.start_recording()
+
         # Reset environment
         obs, _ = wrapped_env.get_observations()
 
@@ -285,6 +298,9 @@ def evaluate_policy(
                     env.target_tactile_map_flat[0].reshape(24, 32).cpu().numpy()
                 )
 
+            if save_video:
+                video_camera.render()
+
             # Accumulate reward
             total_reward += reward.item()
             step_count += 1
@@ -316,6 +332,14 @@ def evaluate_policy(
                     print(f"  Saved trajectory ({traj_data['base_target_pos'].shape[0]} steps) to episode_{traj_episode_idx:04d}_{traj_ids[current_traj_idx]}.npz")
                     traj_episode_idx += 1
                     traj_record = {k: [] for k in traj_record}
+
+                # Save video for this episode and start recording the next one
+                if save_video:
+                    video_path = video_save_dir / f"episode_{video_episode_idx:04d}_{traj_ids[current_traj_idx]}.mp4"
+                    video_camera.stop_recording(save_to_filename=str(video_path), fps=video_fps)
+                    print(f"  Saved video to {video_path}")
+                    video_episode_idx += 1
+                    video_camera.start_recording()
 
                 print(
                     f"Episode {episode_count} (iter {iteration_idx}, "
@@ -573,6 +597,7 @@ def main(
     object_name: str | None = None,
     save_trajectory: bool = False,
     num_runs_per_traj: int = 5,
+    save_video: bool = False,
     **cfg_overrides: Any,
 ) -> None:
     """Entry point.
@@ -585,6 +610,7 @@ def main(
     --resume_checkpoint=latest  # Resume from latest checkpoint in exp_name
     --resume_checkpoint=path/to/checkpoint.pt  # Resume from specific checkpoint
     --exp_name=my_experiment  # Run name: logs/<exp_name>/<timestamp>/ and W&B run name (required for --eval)
+    --save_video=True  # With --eval: save one mp4 per episode to <run_dir>/videos/checkpoint_<N>/
     --wandb_project=my_project  # Wandb project name
     --wandb_entity=my_team  # Wandb team/user name
     """
@@ -638,6 +664,7 @@ def main(
             algo_cfg=algo_cfg,
             save_trajectory=save_trajectory,
             num_runs_per_traj=num_runs_per_traj,
+            save_video=save_video,
         )
     else:
         # Training mode

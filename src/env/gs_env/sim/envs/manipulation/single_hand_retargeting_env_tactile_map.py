@@ -51,6 +51,7 @@ class SingleHandRetargetingEnvTactileMap(BaseEnv):
         show_viewer: bool = False,
         device: torch.device = _DEFAULT_DEVICE,
         eval_mode: bool = False,
+        record_video: bool = False,
     ) -> None:
         super().__init__(device=device)
         self._num_envs = num_envs
@@ -58,6 +59,7 @@ class SingleHandRetargetingEnvTactileMap(BaseEnv):
         self._show_viewer = show_viewer
         self._args = args
         self._eval_mode = eval_mode
+        self._record_video = record_video
 
         if not gs._initialized:  # noqa: SLF001
             gs.init(performance_mode=True, backend=getattr(gs.constants.backend, device.type))
@@ -83,6 +85,7 @@ class SingleHandRetargetingEnvTactileMap(BaseEnv):
             num_envs=self._num_envs,
             args=args.scene_args,
             show_viewer=self._show_viewer,
+            use_batch_renderer=not self._record_video,
         )
 
         # == setup the robot ==
@@ -138,6 +141,19 @@ class SingleHandRetargetingEnvTactileMap(BaseEnv):
             near=0.04,
             far=0.3
         )
+
+        # == offscreen camera for saving rollout videos ==
+        # Faces the arm from across the workspace (the viewer's default pose sits behind the
+        # arm, which hides the hand); looks at the same point as the viewer.
+        self._video_camera = None
+        if self._record_video:
+            self._video_camera = self._scene.scene.add_camera(
+                res=(1280, 720),
+                pos=(0.75, -0.45, 0.45),
+                lookat=self._args.scene_args.viewer_options.camera_lookat,
+                fov=45,
+                GUI=False,
+            )
         self._use_pointcloud = self._args.use_wrist_pointcloud
         self._pointcloud_num_points = self._args.wrist_pointcloud_num_points
 
