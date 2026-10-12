@@ -52,6 +52,7 @@ class SingleHandRetargetingEnvTactileMap(BaseEnv):
         device: torch.device = _DEFAULT_DEVICE,
         eval_mode: bool = False,
         record_video: bool = False,
+        show_reference: bool = False,
     ) -> None:
         super().__init__(device=device)
         self._num_envs = num_envs
@@ -60,6 +61,9 @@ class SingleHandRetargetingEnvTactileMap(BaseEnv):
         self._args = args
         self._eval_mode = eval_mode
         self._record_video = record_video
+        if show_reference and not record_video:
+            raise ValueError("show_reference only applies when record_video is on.")
+        self._show_reference = show_reference
 
         if not gs._initialized:  # noqa: SLF001
             gs.init(performance_mode=True, backend=getattr(gs.constants.backend, device.type))
@@ -185,8 +189,35 @@ class SingleHandRetargetingEnvTactileMap(BaseEnv):
                 ),
             )
 
+        # == translucent demo reference (hand + object) for teacher eval videos ==
+        # Visualization-only (Kinematic) entities: rendered, but never simulated or collided.
+        self._ref_hand = None
+        self._ref_object = None
+        if self._show_reference:
+            if args.robot_args.hand_urdf is None:
+                raise ValueError("show_reference requires robot_args.hand_urdf.")
+            ref_material = gs.materials.Kinematic()
+            ref_surface = gs.surfaces.Default(color=(0.2, 0.6, 1.0), opacity=0.4)
+            self._ref_hand = self._scene.scene.add_entity(
+                gs.morphs.URDF(file=args.robot_args.hand_urdf, fixed=False, collision=False),
+                material=ref_material,
+                surface=ref_surface,
+            )
+            self._ref_object = self._scene.scene.add_entity(
+                gs.morphs.Mesh(file=obj_mesh_file, euler=(90, 0, 0), collision=False),
+                material=ref_material,
+                surface=ref_surface,
+            )
+
         # == build the scene ==
         self._scene.build()
+
+        if self._ref_hand is not None:
+            self._ref_hand_dof_idx_local = [
+                idx
+                for name in args.robot_args.default_gripper_dof.keys()
+                for idx in self._ref_hand.get_joint(name).dofs_idx_local
+            ]
 
         # Cache object geometries for SDF-based fingertip-to-surface distance queries
         if self._object._enable_heterogeneous:
@@ -1125,16 +1156,24 @@ class SingleHandRetargetingEnvTactileMap(BaseEnv):
 
         hand_scale_factor = 1.0
         object_scale_factor = 1.0
-        thumb_failure = diff_thumb_tip > 0.04 / 0.7 * hand_scale_factor
-        index_failure = diff_index_tip > 0.045 / 0.7 * hand_scale_factor
-        middle_failure = diff_middle_tip > 0.05 / 0.7 * hand_scale_factor
-        ring_failure = diff_ring_tip > 0.06 / 0.7 * hand_scale_factor
-        pinky_failure = diff_pinky_tip > 0.06 / 0.7 * hand_scale_factor
+        thumb_tip_threshold = 0.04 / 0.7 * hand_scale_factor
+        index_tip_threshold = 0.045 / 0.7 * hand_scale_factor
+        middle_tip_threshold = 0.05 / 0.7 * hand_scale_factor
+        ring_tip_threshold = 0.06 / 0.7 * hand_scale_factor
+        pinky_tip_threshold = 0.06 / 0.7 * hand_scale_factor
+        obj_pos_threshold = 0.02 / 0.343 * object_scale_factor**3
+        obj_rot_threshold_deg = 15 / 0.343 * object_scale_factor**3
+        diff_obj_angle_deg = diff_obj_angle / np.pi * 180
+        thumb_failure = diff_thumb_tip > thumb_tip_threshold
+        index_failure = diff_index_tip > index_tip_threshold
+        middle_failure = diff_middle_tip > middle_tip_threshold
+        ring_failure = diff_ring_tip > ring_tip_threshold
+        pinky_failure = diff_pinky_tip > pinky_tip_threshold
         hand_pose_failure = (
             thumb_failure | index_failure | middle_failure | ring_failure | pinky_failure
         )
-        obj_pos_failure = diff_obj_pos_dist > 0.02 / 0.343 * object_scale_factor**3
-        obj_rot_failure = diff_obj_angle / np.pi * 180 > 15 / 0.343 * object_scale_factor**3
+        obj_pos_failure = diff_obj_pos_dist > obj_pos_threshold
+        obj_rot_failure = diff_obj_angle_deg > obj_rot_threshold_deg
         object_pose_failure = obj_pos_failure | obj_rot_failure
 
         arm_contact_force_magnitude = torch.norm(self.arm_contact_force, dim=-1).sum(dim=-1)  # (num_envs,)
@@ -1186,6 +1225,25 @@ class SingleHandRetargetingEnvTactileMap(BaseEnv):
             "table_contact_failure": table_contact_failure,
         }
         self._extra_info["termination"] = termination_dict
+        # Measured value and threshold behind each failure flag above (same keys), for
+        # explaining terminations, e.g. in eval videos. Kept out of termination_dict
+        # because the PPO/BC loggers average every entry of that dict.
+        self._extra_info["termination_metrics"] = {
+            "error/wrist_lin_vel": (torch.norm(self.base_lin_vel, dim=-1), 100.0),
+            "error/wrist_ang_vel": (torch.norm(self.base_ang_vel, dim=-1), 200.0),
+            "error/hand_dof_vel": (torch.abs(self.hand_dof_vel).mean(-1), 200.0),
+            "error/obj_lin_vel": (torch.norm(self.object_lin_vel, dim=-1), 100.0),
+            "error/obj_ang_vel": (torch.norm(self.object_ang_vel, dim=-1), 200.0),
+            "hand/thumb_failure": (diff_thumb_tip, thumb_tip_threshold),
+            "hand/index_failure": (diff_index_tip, index_tip_threshold),
+            "hand/middle_failure": (diff_middle_tip, middle_tip_threshold),
+            "hand/ring_failure": (diff_ring_tip, ring_tip_threshold),
+            "hand/pinky_failure": (diff_pinky_tip, pinky_tip_threshold),
+            "object/pos_failure": (diff_obj_pos_dist, obj_pos_threshold),
+            "object/rot_failure": (diff_obj_angle_deg, obj_rot_threshold_deg),
+            "arm_contact_failure": (arm_contact_force_magnitude, 0.0),
+            "table_contact_failure": (self.table_contact_force_magnitude.squeeze(-1), contact_threshold),
+        }
 
         return reset_buf
 
@@ -1800,6 +1858,21 @@ class SingleHandRetargetingEnvTactileMap(BaseEnv):
     def dt(self) -> float:
         """Environment timestep (accounts for decimation)."""
         return self._scene.scene.dt * self._args.robot_args.decimation
+
+    def render_video_frame(self) -> np.ndarray:
+        """Render env 0 from the video camera as an RGB image.
+
+        With show_reference, the demo's kinematic retarget of the hand and object is drawn
+        translucently at the frame the current state is tracked against (the target_* buffers).
+        """
+        if self._ref_hand is not None:
+            self._ref_hand.set_pos(self.target_wrist_pos)
+            self._ref_hand.set_quat(self.target_wrist_quat)
+            self._ref_hand.set_dofs_position(self.target_hand_dof_pos, dofs_idx_local=self._ref_hand_dof_idx_local)
+            self._ref_object.set_pos(self.target_object_pos)
+            self._ref_object.set_quat(self.target_object_quat[:, :4])
+        # force_render: the scene may already have been drawn at this sim time
+        return self._video_camera.render(force_render=True)[0]
 
     def _render_wrist_camera(self) -> None:
         """Render the wrist-camera point cloud into wrist_pointcloud_flat (no-op unless use_wrist_pointcloud)."""

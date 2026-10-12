@@ -55,7 +55,8 @@ def create_gs_env(
         show_viewer=show_viewer,
         device=device_tensor,  # type: ignore
         eval_mode=eval_mode,
-        **({"record_video": True} if record_video else {}),
+        # The teacher's videos also show the demo reference; student envs never get it
+        **({"record_video": True, "show_reference": True} if record_video else {}),
     )
 
 
@@ -86,6 +87,61 @@ def create_ppo_runner_from_registry(
         device=wrapped_env.device,
     )
     return runner
+
+
+def termination_reasons(info: dict[str, Any], env_idx: int = 0) -> list[str]:
+    """Describe every failure criterion that fired for env_idx on this step."""
+    # Failure criteria from the env's termination dict, in display order:
+    # key -> (label, value scale, unit) used to print "label value > threshold unit".
+    failure_criteria = {
+        "hand/thumb_failure": ("Thumb tip error", 100.0, "cm"),
+        "hand/index_failure": ("Index tip error", 100.0, "cm"),
+        "hand/middle_failure": ("Middle tip error", 100.0, "cm"),
+        "hand/ring_failure": ("Ring tip error", 100.0, "cm"),
+        "hand/pinky_failure": ("Pinky tip error", 100.0, "cm"),
+        "object/pos_failure": ("Object position error", 100.0, "cm"),
+        "object/rot_failure": ("Object rotation error", 1.0, "deg"),
+        "arm_contact_failure": ("Arm contact force", 1.0, "N"),
+        "table_contact_failure": ("Table contact force", 1.0, "N"),
+        "error/wrist_lin_vel": ("Wrist linear velocity", 1.0, "m/s"),
+        "error/wrist_ang_vel": ("Wrist angular velocity", 1.0, "rad/s"),
+        "error/hand_dof_vel": ("Mean hand joint velocity", 1.0, "rad/s"),
+        "error/obj_lin_vel": ("Object linear velocity", 1.0, "m/s"),
+        "error/obj_ang_vel": ("Object angular velocity", 1.0, "rad/s"),
+    }
+    termination = info["termination"]
+    metrics = info.get("termination_metrics", {})
+    reasons = []
+    for key, (label, scale, unit) in failure_criteria.items():
+        if key not in termination or not bool(termination[key][env_idx]):
+            continue
+        if key in metrics:
+            value, threshold = metrics[key]
+            value = float(value[env_idx]) * scale
+            threshold = float(threshold) * scale
+            reasons.append(f"{label} {value:.2f} > {threshold:.2f} {unit}")
+        else:
+            reasons.append(label)
+    return reasons
+
+
+def annotate_frame(frame: np.ndarray, lines: list[str], color: tuple[int, int, int]) -> np.ndarray:
+    """Draw text lines in the top-left corner of an RGB frame over a dark backdrop."""
+    import cv2
+
+    frame = np.ascontiguousarray(frame[..., :3]).copy()
+    font = cv2.FONT_HERSHEY_SIMPLEX
+    scale = frame.shape[0] / 720.0
+    thickness = max(1, round(2 * scale))
+    line_h = round(40 * scale)
+    pad = round(15 * scale)
+    width = max(cv2.getTextSize(line, font, scale, thickness)[0][0] for line in lines)
+    overlay = frame.copy()
+    cv2.rectangle(overlay, (0, 0), (width + 2 * pad, line_h * len(lines) + pad), (0, 0, 0), -1)
+    frame = cv2.addWeighted(overlay, 0.6, frame, 0.4, 0)
+    for i, line in enumerate(lines):
+        cv2.putText(frame, line, (pad, line_h * (i + 1)), font, scale, color, thickness, cv2.LINE_AA)
+    return frame
 
 
 def evaluate_policy(
@@ -244,7 +300,24 @@ def evaluate_policy(
             video_save_dir = Path(exp_dir) / "videos" / f"checkpoint_{num_ckpt:04d}"
             video_save_dir.mkdir(parents=True, exist_ok=True)
             video_episode_idx = 0
-            video_camera.start_recording()
+            video_frames: list[np.ndarray] = []
+            # Final frame is held this long with the episode outcome overlaid
+            video_hold_frames = 2 * video_fps
+
+            # The env auto-resets inside step(), so rendering after step() on the terminal
+            # step would show the next trajectory's initial pose. Grab the terminal frame
+            # just before the reset instead.
+            video_env = wrapped_env.env
+            env_reset_idx = video_env.reset_idx
+
+            def reset_idx_with_terminal_frame(envs_idx: torch.Tensor) -> None:
+                video_frames.append(video_env.render_video_frame())
+                env_reset_idx(envs_idx)
+                # Refresh the render context with the post-reset state; otherwise the wrist
+                # camera would reuse the pre-reset scene cached for this sim time.
+                video_camera.render(force_render=True)
+
+            video_env.reset_idx = reset_idx_with_terminal_frame
 
         # Reset environment
         obs, _ = wrapped_env.get_observations()
@@ -298,8 +371,8 @@ def evaluate_policy(
                     env.target_tactile_map_flat[0].reshape(24, 32).cpu().numpy()
                 )
 
-            if save_video:
-                video_camera.render()
+            if save_video and not (torch.any(terminated) or torch.any(truncated)):
+                video_frames.append(video_env.render_video_frame())
 
             # Accumulate reward
             total_reward += reward.item()
@@ -333,13 +406,24 @@ def evaluate_policy(
                     traj_episode_idx += 1
                     traj_record = {k: [] for k in traj_record}
 
-                # Save video for this episode and start recording the next one
+                if not success:
+                    reasons = termination_reasons(info)
+                    print(f"  Failure: {'; '.join(reasons) or 'unknown'}")
+
+                # Save video for this episode, holding the final frame with the outcome on it
                 if save_video:
+                    progress = f"step {episode_length}/{int(traj_lengths[current_traj_idx])}"
+                    if success:
+                        lines, color = [f"SUCCESS ({progress})"], (0, 255, 0)
+                    else:
+                        lines, color = [f"FAILED at {progress}"] + (reasons or ["unknown reason"]), (255, 80, 80)
+                    if video_frames:
+                        video_frames.extend([annotate_frame(video_frames[-1], lines, color)] * video_hold_frames)
                     video_path = video_save_dir / f"episode_{video_episode_idx:04d}_{traj_ids[current_traj_idx]}.mp4"
-                    video_camera.stop_recording(save_to_filename=str(video_path), fps=video_fps)
+                    gs.tools.animate(video_frames, str(video_path), fps=video_fps)
                     print(f"  Saved video to {video_path}")
                     video_episode_idx += 1
-                    video_camera.start_recording()
+                    video_frames.clear()
 
                 print(
                     f"Episode {episode_count} (iter {iteration_idx}, "

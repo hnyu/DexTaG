@@ -144,7 +144,9 @@ modeled on `xarm_wuji_hand`:
 - `ee_link_name`, the hand's root link;
 - `tcp_offset` and `tcp_yaw`, the hand root's pose relative to the arm flange;
 - the paths to `full_hand_tactile.json` (`tactile_grid_path`) and
-  `tactile_pixel_mapping.json` (`tactile_pixel_mapping_path`).
+  `tactile_pixel_mapping.json` (`tactile_pixel_mapping_path`);
+- `hand_urdf`, a URDF of the hand alone, rooted at `ee_link_name`. The retargeter's
+  eval videos (`--save_video=True`) draw it over the policy as the demonstration reference.
 
 **5. Environment config.** In `src/env/gs_env/sim/envs/config/registry.py`, copy
 `single_hand_retargeting_tactile_map_xarm` with your robot entry. Set:

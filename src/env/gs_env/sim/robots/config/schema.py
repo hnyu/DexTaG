@@ -83,6 +83,8 @@ class ManipulatorRobotArgs(BaseModel):
     # Tactile sensor files (robot-side: geometry depends on hand morphology)
     tactile_grid_path: str | None = None
     tactile_pixel_mapping_path: str | None = None
+    # Hand-only URDF rooted at ee_link_name, drawn as the demo reference in teacher eval videos
+    hand_urdf: str | None = None
 
 
 class DomainRandomizationArgs(BaseModel):
