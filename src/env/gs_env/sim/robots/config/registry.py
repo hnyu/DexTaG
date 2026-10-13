@@ -212,3 +212,15 @@ RobotArgsRegistry["xarm_wuji_hand"] = ManipulatorRobotArgs(
     tactile_pixel_mapping_path="assets/robot/wujihand-urdf/tactile_pixel_mapping_v5.json",
     hand_urdf="assets/robot/xarm/wujihand_v5_right.urdf",
 )
+
+# Same robot, but the arm is commanded by a wrist delta pose in the current wrist frame
+# (6 actions instead of 7 joint deltas). A unit action moves the wrist ~1 cm / ~3 deg per step,
+# about the 99th percentile of per-step wrist motion in the marker-pen demonstrations.
+RobotArgsRegistry["xarm_wuji_hand_wrist_ctrl"] = RobotArgsRegistry["xarm_wuji_hand"].model_copy(
+    update={
+        "ctrl_type": CtrlType.WRIST_REL_HAND_ABS,
+        "wrist_pos_action_scale": 0.01,
+        "wrist_rot_action_scale": 0.05,
+        "ik_damping": 0.05,
+    }
+)

@@ -21,6 +21,7 @@ import numpy as np
 import torch
 from gs_agent.algos.config.registry import (
     PPO_HAND_IMITATOR_TACTILE_MAP_XARM,
+    PPO_HAND_IMITATOR_TACTILE_MAP_XARM_WF,
 )
 from gs_agent.algos.ppo import PPO
 from gs_agent.runners.config.registry import RUNNER_SINGLE_HAND_RETARGETING_MLP
@@ -30,6 +31,12 @@ from gs_agent.utils.policy_loader import load_latest_model
 from gs_agent.wrappers.gs_env_wrapper import GenesisEnvWrapper
 from gs_env.sim.envs.config.registry import EnvArgsRegistry, OBJECT_REGISTRY
 from utils import apply_overrides_generic, config_to_yaml, seed_everything
+
+
+# PPO config (network input layout) for each env entry; PPO_HAND_IMITATOR_TACTILE_MAP_XARM otherwise
+PPO_ARGS_BY_ENV = {
+    "single_hand_retargeting_tactile_map_xarm_wf": PPO_HAND_IMITATOR_TACTILE_MAP_XARM_WF,
+}
 
 
 def create_gs_env(
@@ -726,7 +733,7 @@ def main(
     env_args = apply_overrides_generic(env_args, env_overrides, prefixes=("cfgs.", "env."))
 
     algo_cfg = apply_overrides_generic(
-        PPO_HAND_IMITATOR_TACTILE_MAP_XARM, algo_overrides, prefixes=("cfgs.", "algo.")
+        PPO_ARGS_BY_ENV.get(env_name, PPO_HAND_IMITATOR_TACTILE_MAP_XARM), algo_overrides, prefixes=("cfgs.", "algo.")
     )
     runner_args = apply_overrides_generic(
         RUNNER_SINGLE_HAND_RETARGETING_MLP, runner_overrides, prefixes=("cfgs.", "runner.")

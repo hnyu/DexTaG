@@ -10,6 +10,7 @@ from gs_agent.modules.config.schema import (
 #   - teacher actor   : TEMPORAL_ENCODER_TACTILE_MAP_XARM_NO_HIST (no history input)
 #   - teacher critic  : TEMPORAL_ENCODER_TACTILE_MAP_XARM         (with privileged history)
 #   - student policy  : TEMPORAL_ENCODER_BC                       (deployment obs only)
+# plus the wrist-frame teacher variant (TEMPORAL_ENCODER_TACTILE_MAP_XARM_WF[_ACTOR]).
 # ------------------------------------------------------------
 
 # Teacher critic: tactile-map encoder with privileged history, xArm proprio.
@@ -58,6 +59,25 @@ TEMPORAL_ENCODER_TACTILE_MAP_XARM_NO_HIST = TemporalEncoderConfig(
     activation=ActivationType.SWISH,
     dropout_rate=0.1,
     use_layer_norm=True,
+)
+
+# Wrist-frame teacher (env single_hand_retargeting_tactile_map_xarm_wf): every input relative to
+# the current wrist pose, wrist-delta arm actions, and the actor also gets the history.
+TEMPORAL_ENCODER_TACTILE_MAP_XARM_WF = TEMPORAL_ENCODER_TACTILE_MAP_XARM.model_copy(
+    update={
+        "motion_dim": 101,            # 20+20 (hand dof pos/vel) + 15+20 (5-tip pos+quat) + 3+4+3+3 (wrist) + 3+4+3+3 (object)
+        "proprio_dim": 89,            # 88 (wrist-frame proprio) + 1 (last_reward, critic only)
+        "history_dim": 912,           # 8 * 114
+        "history_per_step_dim": 114,  # 88 (proprio) + 26 (action: 6 wrist + 20 hand)
+        "future_dim": 1616,           # 16 * 101
+        "future_per_step_dim": 101,
+    }
+)
+TEMPORAL_ENCODER_TACTILE_MAP_XARM_WF_ACTOR = TEMPORAL_ENCODER_TACTILE_MAP_XARM_WF.model_copy(
+    update={
+        "proprio_dim": 88,
+        "add_target_tactile_map": False,
+    }
 )
 
 # Student policy: deployment-only obs (no tactile map), wrist point cloud input.

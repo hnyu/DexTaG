@@ -5,6 +5,8 @@ from gs_agent.modules.config.registry import (
     TEMPORAL_ENCODER_BC,
     TEMPORAL_ENCODER_TACTILE_MAP_XARM,
     TEMPORAL_ENCODER_TACTILE_MAP_XARM_NO_HIST,
+    TEMPORAL_ENCODER_TACTILE_MAP_XARM_WF,
+    TEMPORAL_ENCODER_TACTILE_MAP_XARM_WF_ACTOR,
 )
 
 # Teacher PPO config: tactile map encoder with xArm. Actor has no history input,
@@ -28,6 +30,14 @@ PPO_HAND_IMITATOR_TACTILE_MAP_XARM = PPOArgs(
     num_epochs=5,
     num_mini_batches=4,
     rollout_length=32,
+)
+
+# Wrist-frame teacher: same PPO settings; actor and critic both get the wrist-frame history.
+PPO_HAND_IMITATOR_TACTILE_MAP_XARM_WF = PPO_HAND_IMITATOR_TACTILE_MAP_XARM.model_copy(
+    update={
+        "policy_backbone": TEMPORAL_ENCODER_TACTILE_MAP_XARM_WF_ACTOR,
+        "critic_backbone": TEMPORAL_ENCODER_TACTILE_MAP_XARM_WF,
+    }
 )
 
 # BC config for single hand retargeting distillation (teacher -> student)

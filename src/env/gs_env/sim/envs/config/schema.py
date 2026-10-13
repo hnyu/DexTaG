@@ -129,6 +129,9 @@ class SingleHandRetargetingEnvArgs(EnvArgs):
     split_seed: int = 0
     trajectory_augmentation: TrajectoryAugmentationConfig = TrajectoryAugmentationConfig()
     trajectory_playback_hz: float = 60.0  # Resample trajectories to this playback rate (Hz) if different from original 60 Hz
+    # Re-express action_proprio_history_flat in the current wrist frame at every step (world-frame
+    # quantities of past steps are measured from the current wrist pose). Use with the *_wf terms.
+    wrist_frame_obs: bool = False
 
     @model_validator(mode="after")
     def _check_obs_and_student_terms(self) -> "SingleHandRetargetingEnvArgs":

@@ -47,6 +47,9 @@ class URDFMorphArgs(BaseModel):
 
 class CtrlType(GenesisEnum):
     ARM_REL_HAND_ABS = "ARM_REL_HAND_ABS"  # Arm delta pose + hand absolute pose control
+    # Wrist delta pose in the current wrist frame (3 translation + 3 rotation vector), reached
+    # with damped-least-squares IK on the arm, + hand absolute pose control
+    WRIST_REL_HAND_ABS = "WRIST_REL_HAND_ABS"
 
 
 class IKSolver(GenesisEnum):
@@ -72,6 +75,11 @@ class ManipulatorRobotArgs(BaseModel):
     soft_dof_pos_range: float = 1.0  # Soft limit range multiplier (1.0 = use full range)
     action_scale: float = 0.1  # Scale factor for hand (finger) actions
     base_action_scale: float = 0.01  # Scale factor for arm (delta-joint) actions
+    # WRIST_REL_HAND_ABS only: wrist translation (m) and rotation (rad) per unit action, and
+    # the damping of the IK solve (rows of the wrist Jacobian are in m and rad)
+    wrist_pos_action_scale: float = 0.01
+    wrist_rot_action_scale: float = 0.05
+    ik_damping: float = 0.05
     action_ema: float = 1.0  # Hand-target blend toward current pos (1.0 = no smoothing)
     decimation: int = 4  # Number of simulation steps per action
     dof_kp: dict[str, float]

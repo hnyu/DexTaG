@@ -117,6 +117,12 @@ class BC(BaseAlgo):
         from utils import yaml_to_config  # type: ignore
 
         self._teacher_env_args = yaml_to_config(teacher_config_path, SingleHandRetargetingEnvArgs)
+        # The student acts in arm joint space, and its env doesn't build the wrist-frame history
+        if self._teacher_env_args.wrist_frame_obs or self._teacher_env_args.robot_args.ctrl_type != "ARM_REL_HAND_ABS":
+            raise NotImplementedError(
+                "Distilling from a wrist-frame teacher (wrist-delta arm actions) is not supported yet; "
+                "use a teacher trained with single_hand_retargeting_tactile_map_xarm."
+            )
 
         # Compute teacher observation dimension
         teacher_obs, _ = self.env.get_teacher_observations(teacher_args=self._teacher_env_args)

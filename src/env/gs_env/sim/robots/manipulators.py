@@ -9,6 +9,7 @@ from genesis.engine.solvers.rigid.rigid_solver import RigidSolver
 from gs_env.common.bases.base_robot import BaseGymRobot
 from gs_env.common.utils.math_utils import quat_to_rotmat
 from gs_env.sim.robots.config.schema import (
+    CtrlType,
     JointPosAction,
     ManipulatorRobotArgs,
 )
@@ -275,15 +276,26 @@ class ManipulatorBase(BaseGymRobot):
         """
         if isinstance(action, torch.Tensor):
             action = JointPosAction(joint_pos=action)
-        self._apply_arm_rel_hand_abs_control(action)
+        if self._args.ctrl_type == CtrlType.WRIST_REL_HAND_ABS:
+            self._apply_wrist_rel_hand_abs_control(action)
+        else:
+            self._apply_arm_rel_hand_abs_control(action)
 
         self._dof_pos[:] = self._robot_entity.get_dofs_position(self._all_dof_idx_local)
         self._dof_vel[:] = self._robot_entity.get_dofs_velocity(self._all_dof_idx_local)
 
-    # The only implemented control mode (CtrlType.ARM_REL_HAND_ABS): arm delta
-    # position + hand absolute position. Subclasses provide the implementation.
+    @property
+    def arm_action_dim(self) -> int:
+        """Number of arm action dims: a 6D wrist delta pose, or one delta per arm joint."""
+        return 6 if self._args.ctrl_type == CtrlType.WRIST_REL_HAND_ABS else self._arm_dof_dim
+
+    # Control modes (CtrlType): arm delta joint position or arm delta wrist pose, plus hand
+    # absolute position. Subclasses provide the implementations.
     def _apply_arm_rel_hand_abs_control(self, act: JointPosAction) -> None:
         raise NotImplementedError("ARM_REL_HAND_ABS control not implemented for base manipulator.")
+
+    def _apply_wrist_rel_hand_abs_control(self, act: JointPosAction) -> None:
+        raise NotImplementedError("WRIST_REL_HAND_ABS control not implemented for base manipulator.")
 
 
     @property
@@ -347,8 +359,9 @@ class XArmWUJIHand(ManipulatorBase):
     def post_build_init(self, eval_mode: bool = False) -> None:
         """Initialize limits and constraints after scene is built."""
         super().post_build_init(eval_mode=eval_mode)
-        # Cache wrist link index for base_* property queries
-        self._wrist_link_idx = self._robot_entity.get_link(self._args.ee_link_name).idx_local
+        # Cache wrist link (index) for base_* property queries and the wrist Jacobian
+        self._wrist_link = self._robot_entity.get_link(self._args.ee_link_name)
+        self._wrist_link_idx = self._wrist_link.idx_local
         # Cache arm link local indices for contact queries
         self._arm_link_idx_local = [
             self._robot_entity.get_link(name).idx_local
@@ -454,7 +467,6 @@ class XArmWUJIHand(ManipulatorBase):
             self._num_envs,
             self._dof_dim,
         ), "Action must match the number of joints."
-        action_ema = self._args.action_ema
 
         # for base, we use relative position control
         base_target_pos = self._dof_pos[:, :self._arm_dof_dim] + act.joint_pos[:, :self._arm_dof_dim]
@@ -464,8 +476,36 @@ class XArmWUJIHand(ManipulatorBase):
         )
         self._last_base_target = base_target_pos
 
-        # for hand, we use absolute position control
-        hand_pos = act.joint_pos[:, self._arm_dof_dim:]
+        self._apply_hand_abs_control(act.joint_pos[:, self._arm_dof_dim:])
+
+    def _apply_wrist_rel_hand_abs_control(self, act: JointPosAction) -> None:
+        """Arm: move the wrist by a delta pose; hand: absolute position control.
+
+        act.joint_pos[:, :6] is the wrist delta [translation (m), rotation vector (rad)] in the
+        world frame, and the remaining entries are normalized hand targets in [-1, 1]. The arm
+        joint delta comes from one damped-least-squares step on the wrist Jacobian:
+        dq = J^T (J J^T + lambda^2 I)^-1 dx.
+        """
+        assert act.joint_pos.shape == (self._num_envs, 6 + self._gripper_dof_dim), (
+            "Action must be a 6D wrist delta followed by the hand targets."
+        )
+        jac = self._robot_entity.get_jacobian(self._wrist_link)[:, :, self._base_dof_idx_local]  # (B, 6, n_arm)
+        damping = self._args.ik_damping**2 * torch.eye(6, device=self._device)
+        wrist_delta = act.joint_pos[:, :6].unsqueeze(-1)  # (B, 6, 1)
+        arm_delta = jac.transpose(1, 2) @ torch.linalg.solve(jac @ jac.transpose(1, 2) + damping, wrist_delta)
+
+        base_target_pos = self._dof_pos[:, :self._arm_dof_dim] + arm_delta.squeeze(-1)
+        self._robot_entity.control_dofs_position(
+            position=base_target_pos,
+            dofs_idx_local=self._base_dof_idx_local,
+        )
+        self._last_base_target = base_target_pos
+
+        self._apply_hand_abs_control(act.joint_pos[:, 6:])
+
+    def _apply_hand_abs_control(self, hand_pos: torch.Tensor) -> None:
+        """Hand absolute position control from normalized targets in [-1, 1]."""
+        action_ema = self._args.action_ema
         hand_dofs_limits = self._dof_pos_limits[:, self._arm_dof_dim:, :]  # (n_envs, hand_dofs, 2)
         limits_lo = hand_dofs_limits[:, :, 0]  # (n_envs, hand_dofs)
         limits_hi = hand_dofs_limits[:, :, 1]  # (n_envs, hand_dofs)
