@@ -69,22 +69,20 @@ TARGET_MOTION_TERMS_TACTILE_MAP = [
 ]  # total = 101
 
 # Wrist-frame variants (see WRIST_FRAME_TERMS in the env): everything relative to the current
-# wrist pose; no absolute wrist pose or arm joint state. Proprio has no wrist/object linear or
-# angular velocities: the history carries the past motion.
+# wrist pose; no absolute wrist pose or arm joint state. Proprio has no hand joint, wrist or
+# object velocities: the history carries the past motion.
 PROPRIO_TERMS_TACTILE_MAP_XARM_WF = [
     "hand_dof_pos",        # 20
-    "hand_dof_vel",        # 20
     "finger_link_pos_wf",  # 15
     "finger_link_quat_wf", # 20
     "object_pos_wf",       # 3
     "fingertip_to_surface_dist",  # 5
     "object_quat_wf",      # 4
     "table_contact_force_magnitude",  # 1
-]  # total = 88
+]  # total = 68
 
 TARGET_MOTION_TERMS_TACTILE_MAP_WF = [
     "target_hand_dof_pos",       # 20
-    "target_hand_dof_vel",       # 20
     "target_mano_joint_pos_wf",  # 15
     "target_mano_joint_quat_wf", # 20
     "target_wrist_pos_wf",       # 3
@@ -95,7 +93,7 @@ TARGET_MOTION_TERMS_TACTILE_MAP_WF = [
     "target_object_quat_wf",     # 4
     "target_object_vel_wf",      # 3
     "target_object_ang_vel_wf",  # 3
-]  # total = 101
+]  # total = 81
 
 BASE_OBS_SCALES = {
     "hand_dof_pos": 1.0, "hand_dof_vel": 1.0,
@@ -312,7 +310,7 @@ EnvArgsRegistry["single_hand_retargeting_tactile_map_xarm"] = SingleHandRetarget
 
 # Teacher with wrist-frame observations and wrist-delta arm actions: targets, proprioception and
 # the action/proprio history are all relative to the current wrist pose, and the actor also gets
-# the history. Train/eval with --env_name=single_hand_retargeting_tactile_map_xarm_wf.
+# the history and the target tactile map. Train/eval with --env_name=single_hand_retargeting_tactile_map_xarm_wf.
 EnvArgsRegistry["single_hand_retargeting_tactile_map_xarm_wf"] = EnvArgsRegistry[
     "single_hand_retargeting_tactile_map_xarm"
 ].model_copy(
@@ -325,6 +323,7 @@ EnvArgsRegistry["single_hand_retargeting_tactile_map_xarm_wf"] = EnvArgsRegistry
             *TARGET_MOTION_TERMS_TACTILE_MAP_WF,
             *PROPRIO_TERMS_TACTILE_MAP_XARM_WF,
             "tactile_map_flat",
+            "target_tactile_map_flat",
             "action_proprio_history_flat",
             "target_action_flat",
         ],

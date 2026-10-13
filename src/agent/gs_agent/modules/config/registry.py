@@ -62,21 +62,21 @@ TEMPORAL_ENCODER_TACTILE_MAP_XARM_NO_HIST = TemporalEncoderConfig(
 )
 
 # Wrist-frame teacher (env single_hand_retargeting_tactile_map_xarm_wf): every input relative to
-# the current wrist pose, wrist-delta arm actions, and the actor also gets the history.
+# the current wrist pose, wrist-delta arm actions, and the actor also gets the history and the
+# target tactile map.
 TEMPORAL_ENCODER_TACTILE_MAP_XARM_WF = TEMPORAL_ENCODER_TACTILE_MAP_XARM.model_copy(
     update={
-        "motion_dim": 101,            # 20+20 (hand dof pos/vel) + 15+20 (5-tip pos+quat) + 3+4+3+3 (wrist) + 3+4+3+3 (object)
-        "proprio_dim": 89,            # 88 (wrist-frame proprio) + 1 (last_reward, critic only)
-        "history_dim": 912,           # 8 * 114
-        "history_per_step_dim": 114,  # 88 (proprio) + 26 (action: 6 wrist + 20 hand)
-        "future_dim": 1616,           # 16 * 101
-        "future_per_step_dim": 101,
+        "motion_dim": 81,             # 20 (hand dof pos) + 15+20 (5-tip pos+quat) + 3+4+3+3 (wrist) + 3+4+3+3 (object)
+        "proprio_dim": 69,            # 68 (wrist-frame proprio) + 1 (last_reward, critic only)
+        "history_dim": 752,           # 8 * 94
+        "history_per_step_dim": 94,   # 68 (proprio) + 26 (action: 6 wrist + 20 hand)
+        "future_dim": 1296,           # 16 * 81
+        "future_per_step_dim": 81,
     }
 )
 TEMPORAL_ENCODER_TACTILE_MAP_XARM_WF_ACTOR = TEMPORAL_ENCODER_TACTILE_MAP_XARM_WF.model_copy(
     update={
-        "proprio_dim": 88,
-        "add_target_tactile_map": False,
+        "proprio_dim": 68,  # no last_reward
     }
 )
 
