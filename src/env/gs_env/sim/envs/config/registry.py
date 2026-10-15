@@ -110,7 +110,9 @@ BASE_OBS_SCALES = {
     "target_wrist_vel": 10.0, "target_wrist_ang_vel": 1.0,
     "delta_object_pos": 10.0, "target_object_pos": 1.0, "target_object_quat": 1.0,
     "target_object_vel": 10.0, "target_object_ang_vel": 1.0,
-    "tactile_map_flat": 5.0, "bps": 10.0, "target_tactile_map_flat": 5.0,
+    # unnormalized maps: one constant for both, mapping the reference range [0, 8.5] (sensor counts
+    # / 60, saturated at 511) to [0, 1.7]; the median contact pixel is ~2.1 -> ~0.4
+    "tactile_map_flat": 0.2, "bps": 10.0, "target_tactile_map_flat": 0.2,
     # per-map normalized tactile maps (as compared by the tactile similarity reward), in [0, 1]
     "tactile_map_norm_flat": 1.0, "target_tactile_map_norm_flat": 1.0,
     "action_proprio_history_flat": 1.0, "action_proprio_history_student_flat": 1.0,
@@ -330,8 +332,8 @@ EnvArgsRegistry["single_hand_retargeting_tactile_map_xarm_wf"] = EnvArgsRegistry
         "actor_obs_terms": [
             *TARGET_MOTION_TERMS_TACTILE_MAP_WF,
             *PROPRIO_TERMS_TACTILE_MAP_XARM_WF,
-            "tactile_map_norm_flat",
-            "target_tactile_map_norm_flat",
+            "tactile_map_flat",
+            "target_tactile_map_flat",
             "action_proprio_history_flat",
             "target_action_flat",
         ],
@@ -339,8 +341,8 @@ EnvArgsRegistry["single_hand_retargeting_tactile_map_xarm_wf"] = EnvArgsRegistry
             *TARGET_MOTION_TERMS_TACTILE_MAP_WF,
             *PROPRIO_TERMS_TACTILE_MAP_XARM_WF,
             "last_reward",
-            "tactile_map_norm_flat",
-            "target_tactile_map_norm_flat",
+            "tactile_map_flat",
+            "target_tactile_map_flat",
             "action_proprio_history_flat",
             "target_action_flat",
         ],
