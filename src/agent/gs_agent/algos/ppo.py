@@ -1,3 +1,4 @@
+import math
 import statistics
 import time
 from collections import deque
@@ -39,6 +40,7 @@ class PPO(BaseAlgo):
         self._actor_obs_dim = self.env.actor_obs_dim
         self._critic_obs_dim = self.env.critic_obs_dim
         self._action_dim = self.env.action_dim
+        self._action_groups: dict[str, slice] = getattr(self.env, "action_groups", {})
 
         self._num_envs = self.env.num_envs
         self._num_steps = cfg.rollout_length
@@ -277,7 +279,7 @@ class PPO(BaseAlgo):
         if self.current_iter >= self.cfg.critic_warmup_iters:
             self._actor_optimizer.step()
 
-        return {
+        metrics = {
             "policy_loss": policy_loss.item(),
             "value_loss": value_loss.item(),
             "entropy_loss": entropy_loss.item(),
@@ -286,6 +288,16 @@ class PPO(BaseAlgo):
             "mean_std": self._actor.action_std.mean().item(),
             "max_std": self._actor.action_std.max().item(),
         }
+        # Per-group entropy and std (e.g. wrist vs hand). The std is state-independent, so the
+        # per-dim Gaussian entropy is 0.5 * ln(2*pi*e) + log_std.
+        with torch.no_grad():
+            dim_entropy = 0.5 * math.log(2 * math.pi * math.e) + self._actor.log_std
+            for name, idx in self._action_groups.items():
+                std = self._actor.action_std[idx]
+                metrics[f"entropy_{name}_per_dim"] = dim_entropy[idx].mean().item()
+                metrics[f"mean_std_{name}"] = std.mean().item()
+                metrics[f"max_std_{name}"] = std.max().item()
+        return metrics
 
     def train_one_iteration(self) -> dict[str, Any]:
         """Train one iteration."""
@@ -336,6 +348,11 @@ class PPO(BaseAlgo):
                     [metrics["mean_std"] for metrics in train_metrics_list]
                 ),
                 "max_std": statistics.mean([metrics["max_std"] for metrics in train_metrics_list]),
+                **{
+                    key: statistics.mean([metrics[key] for metrics in train_metrics_list])
+                    for name in self._action_groups
+                    for key in (f"entropy_{name}_per_dim", f"mean_std_{name}", f"max_std_{name}")
+                },
                 "learning_rate": self._current_lr,
             },
             "speed": {

@@ -17,12 +17,15 @@ import numpy as np
 import torch
 from genesis.utils.geom import inv_transform_by_quat
 from gs_env.common.bases.base_env import BaseEnv
+from gs_env.common.rewards.hand_imitator_terms import preprocess_tactile_map
 from gs_env.common.utils.math_utils import (
     quat_angle_ignoring_axis,
     quat_apply,
     quat_conjugate,
     quat_from_euler,
     quat_mul,
+    quat_to_angle_axis,
+    quat_to_rotmat,
 )
 from gs_env.common.utils.misc_utils import get_space_dim
 from gs_env.sim.envs.config.schema import SingleHandRetargetingEnvArgs
@@ -36,51 +39,66 @@ _DEFAULT_DEVICE = torch.device("cpu")
 # Wrist-frame observation terms: name -> (world-frame source buffer, kind). Each re-expresses its
 # source in the frame of the current wrist (palm link) pose; kinds:
 #   "point":  a position, measured from the wrist
-#   "vector": a velocity or displacement, rotated only
-#   "quat":   an orientation relative to the wrist, sign-fixed to w >= 0
-# Every source is also available per future step, so these work as target_motion_terms.
+#   "vector": a velocity, displacement or rotation vector, rotated only
+#   "rotvec": an orientation (quat source) relative to the wrist, as a rotation vector (axis * angle);
+#             only for rotations that stay well below 180 deg, where it flips sign
+#   "rot6d":  an orientation (quat source) relative to the wrist, as the first two columns of its
+#             rotation matrix; continuous everywhere, for rotations that can reach 180 deg
+# Every source except gravity is also available per future step, so these work as
+# target_motion_terms.
 WRIST_FRAME_TERMS: dict[str, tuple[str, str]] = {
     # proprioception
+    "gravity_wf": ("gravity", "vector"),
     "finger_link_pos_wf": ("finger_link_pos", "point"),
-    "finger_link_quat_wf": ("finger_link_quat", "quat"),
+    "finger_link_rot6d_wf": ("finger_link_quat", "rot6d"),
     "base_lin_vel_wf": ("base_lin_vel", "vector"),
     "base_ang_vel_wf": ("base_ang_vel", "vector"),
     "object_pos_wf": ("object_pos", "point"),
-    "object_quat_wf": ("object_quat", "quat"),
+    "object_rot6d_wf": ("object_quat", "rot6d"),
     "object_lin_vel_wf": ("object_lin_vel", "vector"),
     "object_ang_vel_wf": ("object_ang_vel", "vector"),
     # targets
     "target_mano_joint_pos_wf": ("target_mano_joint_pos", "point"),
-    "target_mano_joint_quat_wf": ("target_mano_joint_quat", "quat"),
+    "target_mano_joint_rot6d_wf": ("target_mano_joint_quat", "rot6d"),
     "target_wrist_pos_wf": ("target_wrist_pos", "point"),
-    "target_wrist_quat_wf": ("target_wrist_quat", "quat"),
+    "target_wrist_rotvec_wf": ("target_wrist_quat", "rotvec"),
     "target_wrist_vel_wf": ("target_wrist_vel", "vector"),
     "target_wrist_ang_vel_wf": ("target_wrist_ang_vel", "vector"),
     "target_object_pos_wf": ("target_object_pos", "point"),
-    "target_object_quat_wf": ("target_object_quat", "quat"),
+    "target_delta_object_pos_wf": ("delta_object_pos", "vector"),  # target minus current object pos
+    "target_object_rot6d_wf": ("target_object_quat", "rot6d"),
+    "target_delta_object_rotvec_wf": ("delta_object_rotvec", "vector"),  # target relative to current object rotation
     "target_object_vel_wf": ("target_object_vel", "vector"),
     "target_object_ang_vel_wf": ("target_object_ang_vel", "vector"),
+}
+
+# Per-item (input, output) widths of each kind
+WRIST_FRAME_KIND_WIDTHS: dict[str, tuple[int, int]] = {
+    "point": (3, 3), "vector": (3, 3), "rotvec": (4, 3), "rot6d": (4, 6),
 }
 
 
 def to_wrist_frame(x: torch.Tensor, kind: str, wrist_pos: torch.Tensor, wrist_quat: torch.Tensor) -> torch.Tensor:
     """Express world-frame quantities in a wrist frame (see WRIST_FRAME_TERMS for the kinds).
 
-    x: (B, ..., n * 3) for "point"/"vector", (B, ..., n * 4) [w, x, y, z] for "quat".
+    x: (B, ..., n * 3) for "point"/"vector", (B, ..., n * 4) [w, x, y, z] for "rotvec"/"rot6d".
     wrist_pos: (B, 3) and wrist_quat: (B, 4), broadcast over the middle dims of x.
+    Returns (B, ..., n * 3), or (B, ..., n * 6) for "rot6d".
     """
-    width = 4 if kind == "quat" else 3
+    width = WRIST_FRAME_KIND_WIDTHS[kind][0]
     items = x.reshape(*x.shape[:-1], -1, width)  # (B, ..., n, width)
     expand = (x.shape[0],) + (1,) * (items.dim() - 2)
     inv_quat = quat_conjugate(wrist_quat).reshape(*expand, 4).expand(*items.shape[:-1], 4)
-    if kind == "quat":
-        out = quat_mul(inv_quat, items)
-        out = torch.where(out[..., :1] < 0, -out, out)
+    if kind == "rotvec":
+        out = quat_to_angle_axis(quat_mul(inv_quat, items))
+    elif kind == "rot6d":
+        rotmat = quat_to_rotmat(quat_mul(inv_quat, items))  # (B, ..., n, 3, 3)
+        out = torch.cat([rotmat[..., :, 0], rotmat[..., :, 1]], dim=-1)
     else:
         if kind == "point":
             items = items - wrist_pos.reshape(*expand, 3)
         out = quat_apply(inv_quat.contiguous(), items.contiguous())
-    return out.reshape(x.shape)
+    return out.reshape(*x.shape[:-1], -1)
 
 
 class SingleHandRetargetingEnvTactileMap(BaseEnv):
@@ -159,7 +177,7 @@ class SingleHandRetargetingEnvTactileMap(BaseEnv):
         obj_cfg = self._args.object_config
         obj_id = obj_cfg.object_id
         obj_mesh_file = f"{obj_cfg.trajectory_path}/{obj_id}_collision.obj"
-        if self._args.object_domain_randomization and not eval_mode:
+        if self._args.object_domain_randomization and obj_cfg.randomize_scale and not eval_mode:
             # Heterogeneous morphs: different scales across environments
             scale_lo, scale_hi = obj_cfg.scale_range
             n_variants = min(obj_cfg.n_scale_variants, self._num_envs)
@@ -231,12 +249,15 @@ class SingleHandRetargetingEnvTactileMap(BaseEnv):
         )
 
         # == add table when trajectory offset is non-zero ==
+        # Table top height. The object config's table_z_offset moves only the table (not the
+        # reference), to match the table plane the demonstrations were recorded against.
+        self._table_top_z = self._trajectory_offset[2] + obj_cfg.table_z_offset
         if np.any(self._trajectory_offset != 0.0):
             off = self._trajectory_offset
             self._table = self._scene.scene.add_entity(
                 gs.morphs.Box(
                     size=(0.6, 1.0, 0.02),
-                    pos=(off[0] + 0.5, off[1], off[2] - 0.01),
+                    pos=(off[0] + 0.5, off[1], self._table_top_z - 0.01),
                     collision=True,
                     fixed=True,
                 ),
@@ -326,7 +347,7 @@ class SingleHandRetargetingEnvTactileMap(BaseEnv):
         if hasattr(self, '_table') and table_height_noise > 0.0 and not eval_mode:
             off = self._trajectory_offset
             self._table_height_offsets = (torch.rand(self._num_envs, device=self._device) * 2 - 1) * table_height_noise  # (num_envs,)
-            table_pos = torch.tensor([off[0] + 0.5, off[1], off[2] - 0.01], device=self._device).unsqueeze(0).expand(self._num_envs, -1).clone()
+            table_pos = torch.tensor([off[0] + 0.5, off[1], self._table_top_z - 0.01], device=self._device).unsqueeze(0).expand(self._num_envs, -1).clone()
             table_pos[:, 2] += self._table_height_offsets
             self._table.set_pos(table_pos)
             print(f"Table height randomization: ±{table_height_noise*100:.1f}cm, range [{self._table_height_offsets.min():.4f}, {self._table_height_offsets.max():.4f}]")
@@ -374,7 +395,7 @@ class SingleHandRetargetingEnvTactileMap(BaseEnv):
 
         # Table surface height (used for perturbation lift gating and the
         # height-gated velocity-change penalties). Defined unconditionally.
-        self._table_surface_z = self._trajectory_offset[2] if np.any(self._trajectory_offset != 0.0) else 0.0
+        self._table_surface_z = self._table_top_z if np.any(self._trajectory_offset != 0.0) else 0.0
 
         if self._perturbation_force_scale > 0.0 or self._perturbation_torque_scale > 0.0:
             # Cache object mass for mass-scaled forces
@@ -817,6 +838,10 @@ class SingleHandRetargetingEnvTactileMap(BaseEnv):
         self.object_vel_change = torch.zeros((self.num_envs,), device=self._device)
         self.object_ang_vel_change = torch.zeros((self.num_envs,), device=self._device)
         self.object_height_above_table = torch.zeros((self.num_envs,), device=self._device)
+        # Unit gravity direction in the world frame (source of gravity_wf)
+        self.gravity = torch.tensor([0.0, 0.0, -1.0], device=self._device).repeat(self.num_envs, 1)
+        # Table-top z minus wrist z (world vertical; negative while the wrist is above the table)
+        self.table_height_rel = torch.zeros((self.num_envs, 1), device=self._device)
         self.fingertip_to_surface_dist = torch.zeros((self.num_envs, 5), device=self._device)  # SDF-based distance
         self.table_contact_force_magnitude = torch.zeros((self.num_envs, 1), device=self._device)
         self.last_reward = torch.zeros((self.num_envs, 1), device=self._device)
@@ -834,6 +859,8 @@ class SingleHandRetargetingEnvTactileMap(BaseEnv):
         # object
         self.target_object_pos = torch.zeros((self.num_envs, 3), device=self._device)
         self.delta_object_pos = torch.zeros((self.num_envs, 3), device=self._device)
+        # Rotation from the current to the target object orientation, as a world-axes rotation vector
+        self.delta_object_rotvec = torch.zeros((self.num_envs, 3), device=self._device)
         self.target_object_quat = torch.zeros((self.num_envs, 4), device=self._device)
         self.target_object_vel = torch.zeros((self.num_envs, 3), device=self._device)
         self.target_object_ang_vel = torch.zeros((self.num_envs, 3), device=self._device)
@@ -850,8 +877,11 @@ class SingleHandRetargetingEnvTactileMap(BaseEnv):
         self.finger_link_quat = torch.zeros((self.num_envs, 5 * 4), device=self._device)
 
         # Wrist-frame versions of the buffers above (refreshed in update_buffers)
-        for name, (source, _) in WRIST_FRAME_TERMS.items():
-            setattr(self, name, torch.zeros_like(getattr(self, source)))
+        for name, (source, kind) in WRIST_FRAME_TERMS.items():
+            width = getattr(self, source).shape[-1]
+            in_width, out_width = WRIST_FRAME_KIND_WIDTHS[kind]
+            width = width // in_width * out_width
+            setattr(self, name, torch.zeros((self.num_envs, width), device=self._device))
 
         # Compute proprio_dim from config term list
         self._proprio_dim = sum(getattr(self, t).shape[-1] for t in self._args.proprio_terms)
@@ -861,7 +891,13 @@ class SingleHandRetargetingEnvTactileMap(BaseEnv):
         if self._args.wrist_frame_obs:
             # Raw (world-frame, unscaled) proprio history, re-expressed in the current wrist
             # frame each step; _history_steps counts the valid entries since the last reset.
-            self._proprio_world_history_buf = torch.zeros_like(self.proprio_history_buf)
+            world_proprio_dim = sum(
+                getattr(self, WRIST_FRAME_TERMS[t][0] if t in WRIST_FRAME_TERMS else t).shape[-1]
+                for t in self._args.proprio_terms
+            )  # orientation terms are stored as their quat sources
+            self._proprio_world_history_buf = torch.zeros(
+                (self.num_envs, self._args.obs_history_len, world_proprio_dim), device=self._device
+            )
             self._history_steps = torch.zeros(self.num_envs, dtype=torch.long, device=self._device)
         action_dim = self._hand_dof_dim + self._arm_action_dim
         self.action_history_buf = torch.zeros(
@@ -910,9 +946,15 @@ class SingleHandRetargetingEnvTactileMap(BaseEnv):
         # Per-trajectory rollout length tracking (training only, for logging statistics).
         self._per_traj_ep_len_buf: list[deque] = [deque(maxlen=64) for _ in range(self._num_trajectories)]
 
-        # Action scale
-        self._action_scale = self._args.robot_args.action_scale
-        self._base_action_scale = self._args.robot_args.base_action_scale
+        # Per-dim action scales, from policy units to robot commands (applied at execution)
+        robot_args = self._args.robot_args
+        if self._wrist_ctrl:
+            arm_scales = [robot_args.wrist_pos_action_scale] * 3 + [robot_args.wrist_rot_action_scale] * 3
+        else:
+            arm_scales = [robot_args.base_action_scale] * self._arm_action_dim
+        self._action_scales = torch.tensor(
+            arm_scales + [robot_args.action_scale] * self._hand_dof_dim, device=self._device
+        )
 
         # Action history length and latency
         self._action_history_len = self._args.obs_history_len
@@ -930,6 +972,14 @@ class SingleHandRetargetingEnvTactileMap(BaseEnv):
         # 2D tactile map buffer (flattened)
         h, w = self._tactile_map_converter.image_shape  # (24, 32)
         self.tactile_map_flat = torch.zeros((self.num_envs, h * w), device=self._device)
+        # Normalized maps (observations): the preprocessing of the tactile similarity reward, with
+        # its parameters, so the policy sees the maps the reward compares
+        self._tactile_norm_args = {
+            k: v for k, v in self._args.reward_args.get("WeightedGaussianBlurredTactileMapSimilarityReward", {}).items()
+            if k in ("min_max", "gamma", "sigma")
+        }
+        self.tactile_map_norm_flat = torch.zeros_like(self.tactile_map_flat)
+        self.target_tactile_map_norm_flat = torch.zeros_like(self.tactile_map_flat)
         # Build per-pixel weight tensor for weighted tactile reward
         self.tactile_pixel_weights = self._build_tactile_pixel_weights(h, w)
         # Build per-fingertip pixel masks for tactile-gated proximity reward
@@ -1040,7 +1090,6 @@ class SingleHandRetargetingEnvTactileMap(BaseEnv):
         )
 
         object_pos = self._traj_data["obj_pos"][envs_idx, seq_idx]  # (num_reset, 3)
-        object_pos[:, 2] += 0.01  # small lift at reset to avoid initial table penetration (all objects)
         object_pos[:, 2] += self._table_height_offsets[envs_idx]  # compensate per-env table height noise
         object_quat = self._traj_data["obj_quat"][envs_idx, seq_idx]  # (num_reset, 4)
         object_lin_vel = self._traj_data["obj_vel"][envs_idx, seq_idx]  # (num_reset, 3)
@@ -1416,6 +1465,7 @@ class SingleHandRetargetingEnvTactileMap(BaseEnv):
         self.object_height_above_table[:] = (
             self.object_pos[:, 2] - (self._table_surface_z + self._table_height_offsets)
         )
+        self.table_height_rel[:, 0] = self._table_surface_z + self._table_height_offsets - self.base_pos[:, 2]
 
         # SDF-based fingertip-to-surface distance
         self._compute_fingertip_to_surface_dist()
@@ -1439,11 +1489,15 @@ class SingleHandRetargetingEnvTactileMap(BaseEnv):
         self.target_object_pos[:] = self._traj_data["obj_pos"][batch_indices, future_index]  # (num_envs, 3)
         self.delta_object_pos[:] = self.target_object_pos - self.object_pos  # (num_envs, 3)
         self.target_object_quat[:] = self._traj_data["obj_quat"][batch_indices, future_index]  # (num_envs, 4)
+        self.delta_object_rotvec[:] = quat_to_angle_axis(
+            quat_mul(self.target_object_quat, quat_conjugate(self.object_quat))
+        )  # (num_envs, 3)
         self.target_object_vel[:] = self._traj_data["obj_vel"][batch_indices, future_index]  # (num_envs, 3)
         self.target_object_ang_vel[:] = self._traj_data["obj_ang_vel"][batch_indices, future_index]  # (num_envs, 3)
 
         # Update reference tactile map
         self.target_tactile_map_flat[:] = self._traj_data["tactile_map_ref"][batch_indices, future_index]  # (num_envs, 768)
+        self.target_tactile_map_norm_flat[:] = preprocess_tactile_map(self.target_tactile_map_flat, **self._tactile_norm_args)
 
         # Update fingertip positions (5 tips)
         self.target_mano_joint_pos[:] = self._traj_data["mano_joint_poses"][batch_indices, future_index].reshape(self.num_envs, -1)  # (num_envs, 5 * 3)
@@ -1480,6 +1534,7 @@ class SingleHandRetargetingEnvTactileMap(BaseEnv):
         # Convert to 2D tactile map
         tactile_map = self._tactile_map_converter.update(tactile_forces_flat)  # (B, 24, 32)
         self.tactile_map_flat[:] = tactile_map.reshape(self.num_envs, -1)  # (B, 768)
+        self.tactile_map_norm_flat[:] = preprocess_tactile_map(self.tactile_map_flat, **self._tactile_norm_args)
 
         self.dof_force[:] = self._robot.dofs_control_force
 
@@ -1510,7 +1565,8 @@ class SingleHandRetargetingEnvTactileMap(BaseEnv):
 
         proprio_parts, start = [], 0
         for term in terms:
-            width = getattr(self, term).shape[-1]
+            source = WRIST_FRAME_TERMS[term][0] if term in WRIST_FRAME_TERMS else term
+            width = getattr(self, source).shape[-1]
             part = self._proprio_world_history_buf[:, :, start:start + width]
             if term in WRIST_FRAME_TERMS:
                 part = to_wrist_frame(part, WRIST_FRAME_TERMS[term][1], self.base_pos, self.base_quat)
@@ -1573,6 +1629,9 @@ class SingleHandRetargetingEnvTactileMap(BaseEnv):
         future_absolute_object_pos = self._traj_data["obj_pos"][env_indices, future_indices]  # (num_envs, K, 3)
         future_delta_object_pos = future_absolute_object_pos - self.object_pos.unsqueeze(1)  # (num_envs, K, 3)
         future_object_quat = self._traj_data["obj_quat"][env_indices, future_indices]  # (num_envs, K, 4)
+        future_delta_object_rotvec = quat_to_angle_axis(
+            quat_mul(future_object_quat, quat_conjugate(self.object_quat).unsqueeze(1))
+        )  # (num_envs, K, 3)
         future_object_vel = self._traj_data["obj_vel"][env_indices, future_indices]  # (num_envs, K, 3)
         future_object_ang_vel = self._traj_data["obj_ang_vel"][env_indices, future_indices]  # (num_envs, K, 3)
 
@@ -1589,6 +1648,7 @@ class SingleHandRetargetingEnvTactileMap(BaseEnv):
             "delta_object_pos": future_delta_object_pos,
             "target_object_pos": future_absolute_object_pos,
             "target_object_quat": future_object_quat,
+            "delta_object_rotvec": future_delta_object_rotvec,
             "target_object_vel": future_object_vel,
             "target_object_ang_vel": future_object_ang_vel,
         }
@@ -1810,25 +1870,20 @@ class SingleHandRetargetingEnvTactileMap(BaseEnv):
         """Apply an action: arm part first (7 joint deltas, or a 6D wrist delta pose in the
         current wrist frame), then the normalized absolute hand targets.
 
-        Arm and hand parts are scaled separately before entering the action history. Wrist
-        deltas are stored in the world frame, so a delayed action moves the wrist as commanded.
+        The action history keeps actions in policy units (unscaled), so it can be observed
+        directly; the action scales are applied at execution. Wrist deltas are stored in the world
+        frame, so a delayed action moves the wrist as commanded.
         """
         action = action.detach().to(self._device)
 
-        # Scale action before storing in history buffer
-        arm_dim = self._arm_action_dim
-        scaled_action = action.clone()
+        stored_action = action.clone()
         if self._wrist_ctrl:
-            robot_args = self._args.robot_args
-            scaled_action[:, 0:3] = quat_apply(self.base_quat, action[:, 0:3] * robot_args.wrist_pos_action_scale)
-            scaled_action[:, 3:6] = quat_apply(self.base_quat, action[:, 3:6] * robot_args.wrist_rot_action_scale)
-        else:
-            scaled_action[:, :arm_dim] *= self._base_action_scale
-        scaled_action[:, arm_dim:] *= self._action_scale
+            stored_action[:, 0:3] = quat_apply(self.base_quat, action[:, 0:3])
+            stored_action[:, 3:6] = quat_apply(self.base_quat, action[:, 3:6])
 
-        # Update action history buffer (shift and add scaled action)
+        # Update action history buffer (shift and add the new action)
         self.action_history_buf[:] = torch.cat(
-            [self.action_history_buf[:, 1:], scaled_action.unsqueeze(1)],
+            [self.action_history_buf[:, 1:], stored_action.unsqueeze(1)],
             dim=1
         )
 
@@ -1840,7 +1895,7 @@ class SingleHandRetargetingEnvTactileMap(BaseEnv):
         buf_idx = self._action_history_len - 1 - latency
         exec_action = self.action_history_buf[
             torch.arange(self.num_envs, device=self._device), buf_idx
-        ]
+        ] * self._action_scales
 
         # Precompute object guide force targets (before physics loop)
         guide_decay_steps = self._args.object_guide_force_decay_steps
@@ -1954,6 +2009,15 @@ class SingleHandRetargetingEnvTactileMap(BaseEnv):
     @property
     def action_dim(self) -> int:
         return self._arm_action_dim + self._hand_dof_dim  # 7 arm joints (or 6D wrist) + 20 hand
+
+    @property
+    def action_groups(self) -> dict[str, slice]:
+        """Named slices of the action vector, for per-group logging."""
+        arm_name = "wrist" if self._wrist_ctrl else "arm"
+        return {
+            arm_name: slice(0, self._arm_action_dim),
+            "hand": slice(self._arm_action_dim, self.action_dim),
+        }
 
     @property
     def actor_obs_dim(self) -> int:

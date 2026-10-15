@@ -270,6 +270,30 @@ def _normalize_and_gamma_tactile(
     return x
 
 
+def _gaussian_kernel_3x3(sigma: float) -> torch.Tensor:
+    """Normalized 3x3 Gaussian kernel, shaped (1, 1, 3, 3) for conv2d."""
+    ax = torch.arange(-1, 2, dtype=torch.float32)
+    xx, yy = torch.meshgrid(ax, ax, indexing="ij")
+    kernel = torch.exp(-(xx**2 + yy**2) / (2.0 * sigma**2))
+    return (kernel / kernel.sum()).reshape(1, 1, 3, 3)
+
+
+def preprocess_tactile_map(
+    x_flat: torch.Tensor, min_max: float = 1.0, gamma: float = 0.5, sigma: float = 1.0,
+    kernel: torch.Tensor | None = None,
+) -> torch.Tensor:
+    """Per-map normalize + gamma (see _normalize_and_gamma_tactile), then a 3x3 Gaussian blur.
+
+    The tactile maps compared by WeightedGaussianBlurredTactileMapSimilarityReward, also used
+    as observations. x_flat: (B, 24 * 32) -> (B, 24 * 32) in [0, 1].
+    """
+    if kernel is None:
+        kernel = _gaussian_kernel_3x3(sigma)
+    x = _normalize_and_gamma_tactile(x_flat.reshape(-1, 1, 24, 32), min_max, gamma)
+    x = F.conv2d(x, kernel.to(x.device), padding=1)  # padding=1 keeps spatial dims
+    return x.reshape(x_flat.shape)
+
+
 class WeightedGaussianBlurredTactileMapSimilarityReward(RewardTerm):
     """
     Compares tactile maps after visualization-matching preprocessing (per-map
@@ -299,13 +323,7 @@ class WeightedGaussianBlurredTactileMapSimilarityReward(RewardTerm):
         # Visualization-matching preprocessing (see _normalize_and_gamma_tactile)
         self.gamma = gamma
         self.min_max = min_max
-        # Build normalised 3x3 Gaussian kernel
-        ax = torch.arange(-1, 2, dtype=torch.float32)
-        xx, yy = torch.meshgrid(ax, ax, indexing="ij")
-        kernel = torch.exp(-(xx**2 + yy**2) / (2.0 * sigma**2))
-        kernel = kernel / kernel.sum()
-        # Shape for conv2d: (out_channels=1, in_channels=1, 3, 3)
-        self._kernel = kernel.reshape(1, 1, 3, 3)
+        self._kernel = _gaussian_kernel_3x3(sigma)
 
     def _compute(self, tactile_map_flat: torch.Tensor, target_tactile_map_flat: torch.Tensor, tactile_pixel_weights: torch.Tensor) -> torch.Tensor:  # type: ignore
         # Lazy device move
@@ -316,17 +334,11 @@ class WeightedGaussianBlurredTactileMapSimilarityReward(RewardTerm):
         num_contact = mask.sum(dim=-1)  # (B,)
         # Smooth gate: 0 with no contact, linear ramp 0->1 over 1->10 pixels, 1 above
         contact_scale = (num_contact.float() / 10.0).clamp(0.0, 1.0)
-        # Reshape to spatial maps
-        cur = tactile_map_flat.reshape(-1, 1, 24, 32)
-        tgt = target_tactile_map_flat.reshape(-1, 1, 24, 32)
-        # Match the visualization preprocessing: per-map normalize + gamma...
-        cur = _normalize_and_gamma_tactile(cur, self.min_max, self.gamma)
-        tgt = _normalize_and_gamma_tactile(tgt, self.min_max, self.gamma)
-        # ...then Gaussian blur (padding=1 keeps spatial dims)
-        cur = F.conv2d(cur, self._kernel, padding=1)
-        tgt = F.conv2d(tgt, self._kernel, padding=1)
+        # Match the visualization preprocessing: per-map normalize + gamma, then Gaussian blur
+        cur = preprocess_tactile_map(tactile_map_flat, self.min_max, self.gamma, kernel=self._kernel)
+        tgt = preprocess_tactile_map(target_tactile_map_flat, self.min_max, self.gamma, kernel=self._kernel)
         # Weighted + target-masked L1 error
-        diff = torch.abs((tgt - cur).reshape(tactile_map_flat.shape[0], -1))  # (B, 768)
+        diff = torch.abs(tgt - cur)  # (B, 768)
         weights = tactile_pixel_weights * mask  # (768,) * (B, 768) -> (B, 768)
         weight_sum = weights.sum(dim=-1).clamp(min=1)  # (B,)
         error = (diff * weights).sum(dim=-1) / weight_sum  # (B,)

@@ -43,6 +43,9 @@ class ObjectConfig(BaseModel):
     # Domain randomization defaults
     mass_randomization_range: float = 0.3  # +/- fraction of base mass
     friction_range: tuple[float, float] = (0.7, 1.5)  # min/max friction ratio
+    # Mesh scale randomization changes the geometry without changing the reference, so it is off by
+    # default; use trajectory_augmentation for variation that stays consistent with the reference.
+    randomize_scale: bool = False
     scale_range: tuple[float, float] = (0.9, 1.1)  # min/max object scale for heterogeneous morphs
     n_scale_variants: int = 10  # number of distinct scale variants
     # Random perturbation forces applied to object during training
@@ -53,11 +56,15 @@ class ObjectConfig(BaseModel):
     perturbation_lift_threshold: float = 0.05   # Only perturb when object is this far above table [m]
     perturbation_curriculum_start: int = 2000    # Training step at which perturbations begin
     perturbation_curriculum_end: int = 10000     # Training step at which perturbations reach full scale
-    # Initial pose randomization (applied per reset)
-    init_pos_noise_xy: float = 0.02              # uniform ± XY translation noise in meters (Z is not randomized)
-    init_rot_noise_deg: float = 10.0             # uniform ± per-axis rotation noise in degrees
-    # Table height randomization (sampled once per env at init)
-    table_height_noise: float = 0.01             # uniform ± Z offset for table surface in meters
+    # Initial pose randomization (applied per reset). Off by default: it moves the object without
+    # moving the reference, so the teacher would no longer be solving the demonstrated task.
+    init_pos_noise_xy: float = 0.0               # uniform ± XY translation noise in meters (Z is not randomized)
+    init_rot_noise_deg: float = 0.0              # uniform ± per-axis rotation noise in degrees
+    # Table top height relative to trajectory_offset[2] [m]. Moves only the table, so the object's
+    # reference start pose rests on it (e.g. -radius when the demos put the object's center on the plane).
+    table_z_offset: float = 0.0
+    # Table height randomization (sampled once per env at init). Off by default for the same reason.
+    table_height_noise: float = 0.0              # uniform ± Z offset for table surface in meters
 
 
 class TrajectoryAugmentationConfig(BaseModel):

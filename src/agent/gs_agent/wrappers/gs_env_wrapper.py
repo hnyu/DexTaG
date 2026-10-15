@@ -72,6 +72,11 @@ class GenesisEnvWrapper(BaseEnvWrapper):
         return self.env.action_dim
 
     @property
+    def action_groups(self) -> dict[str, slice]:
+        """Named slices of the action vector; empty if the env defines none."""
+        return getattr(self.env, "action_groups", {})
+
+    @property
     def actor_obs_dim(self) -> int:
         return self.env.actor_obs_dim
 

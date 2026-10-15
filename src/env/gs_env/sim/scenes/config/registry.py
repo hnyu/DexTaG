@@ -144,6 +144,9 @@ SceneArgsRegistry["flat_scene_default"] = FlatSceneArgs(
         box_box_detection=True,
         noslip_iterations=0,
         batch_dofs_info=True,  # Enable per-env kp/kv/damping/armature
+        # Enable per-env link mass / COM (robot and object domain randomization). Heterogeneous
+        # object morphs used to imply this; without scale variants it must be set explicitly.
+        batch_links_info=True,
     ),
     mpm_options=MPMArgsRegistry["default"],
     fem_options=FEMArgsRegistry["default"],

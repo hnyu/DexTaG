@@ -3,6 +3,7 @@ from gs_env.sim.envs.config.schema import (
     GenesisInitArgs,
     ObjectConfig,
     SingleHandRetargetingEnvArgs,
+    TrajectoryAugmentationConfig,
 )
 from gs_env.sim.robots.config.registry import RobotArgsRegistry
 from gs_env.sim.scenes.config.registry import SceneArgsRegistry
@@ -14,11 +15,11 @@ OBJECT_REGISTRY: dict[str, ObjectConfig] = {
         object_id="marker_pen_scanned",
         rotation_ignore_axis=[0, 1, 0],
         mass=0.03,
+        # The demos put the pen's center (2 cm diameter) on the table plane; lower the table by the
+        # radius so the reference start pose rests on it.
+        table_z_offset=-0.01,
         perturbation_force_scale=20.0,
         perturbation_torque_scale=0.2,
-        init_pos_noise_xy=0.03,
-        init_rot_noise_deg=15.0,
-        table_height_noise=0.015,
     ),
     "hammer": ObjectConfig(
         trajectory_path="data/hammer_mixed/pickles_filtered",
@@ -69,31 +70,32 @@ TARGET_MOTION_TERMS_TACTILE_MAP = [
 ]  # total = 101
 
 # Wrist-frame variants (see WRIST_FRAME_TERMS in the env): everything relative to the current
-# wrist pose; no absolute wrist pose or arm joint state. Proprio has no hand joint, wrist or
-# object velocities: the history carries the past motion.
+# wrist pose (including the gravity direction), plus the table-top height relative to the wrist;
+# no absolute wrist pose or arm joint state. Proprio has no hand joint, wrist or object
+# velocities: the history carries the past motion.
 PROPRIO_TERMS_TACTILE_MAP_XARM_WF = [
     "hand_dof_pos",        # 20
-    "finger_link_pos_wf",  # 15
-    "finger_link_quat_wf", # 20
     "object_pos_wf",       # 3
     "fingertip_to_surface_dist",  # 5
-    "object_quat_wf",      # 4
+    "object_rot6d_wf",     # 6
     "table_contact_force_magnitude",  # 1
-]  # total = 68
+    "gravity_wf",          # 3
+    "table_height_rel",    # 1 (table-top z minus wrist z)
+]  # total = 39
 
 TARGET_MOTION_TERMS_TACTILE_MAP_WF = [
     "target_hand_dof_pos",       # 20
     "target_mano_joint_pos_wf",  # 15
-    "target_mano_joint_quat_wf", # 20
+    "target_mano_joint_rot6d_wf",  # 30
     "target_wrist_pos_wf",       # 3
-    "target_wrist_quat_wf",      # 4
+    "target_wrist_rotvec_wf",    # 3
     "target_wrist_vel_wf",       # 3
     "target_wrist_ang_vel_wf",   # 3
-    "target_object_pos_wf",      # 3
-    "target_object_quat_wf",     # 4
+    "target_delta_object_pos_wf", # 3 (target minus current object pos)
+    "target_delta_object_rotvec_wf", # 3 (target relative to current object rotation)
     "target_object_vel_wf",      # 3
     "target_object_ang_vel_wf",  # 3
-]  # total = 81
+]  # total = 89
 
 BASE_OBS_SCALES = {
     "hand_dof_pos": 1.0, "hand_dof_vel": 1.0,
@@ -109,21 +111,25 @@ BASE_OBS_SCALES = {
     "delta_object_pos": 10.0, "target_object_pos": 1.0, "target_object_quat": 1.0,
     "target_object_vel": 10.0, "target_object_ang_vel": 1.0,
     "tactile_map_flat": 5.0, "bps": 10.0, "target_tactile_map_flat": 5.0,
+    # per-map normalized tactile maps (as compared by the tactile similarity reward), in [0, 1]
+    "tactile_map_norm_flat": 1.0, "target_tactile_map_norm_flat": 1.0,
     "action_proprio_history_flat": 1.0, "action_proprio_history_student_flat": 1.0,
     "target_action_flat": 1.0, "target_action_student_flat": 1.0,
     "wrist_pointcloud_flat": 1.0,
     "table_contact_force_magnitude": 0.05, "last_reward": 1.0,
     # wrist-frame terms: same scales as their world-frame sources, except positions measured from
     # the wrist: hand/object points (~0.1 m away) get the object_pos_rel scale, and the target
-    # wrist (mm to cm away) keeps the delta_wrist_pos scale
-    "finger_link_pos_wf": 5.0, "finger_link_quat_wf": 1.0,
+    # wrist (mm to cm away) keeps the delta_wrist_pos scale; rotation targets are scaled to keep
+    # p99 |value| around 2 over the demo data (the 0.5 s horizon reaches large rotations)
+    "finger_link_pos_wf": 5.0, "finger_link_rot6d_wf": 1.0,
+    "gravity_wf": 1.0, "table_height_rel": 5.0,
     "base_lin_vel_wf": 1.0, "base_ang_vel_wf": 1.0,
-    "object_pos_wf": 5.0, "object_quat_wf": 1.0, "object_lin_vel_wf": 1.0, "object_ang_vel_wf": 0.1,
-    "target_mano_joint_pos_wf": 5.0, "target_mano_joint_quat_wf": 1.0,
-    "target_wrist_pos_wf": 10.0, "target_wrist_quat_wf": 1.0,
+    "object_pos_wf": 5.0, "object_rot6d_wf": 1.0, "object_lin_vel_wf": 1.0, "object_ang_vel_wf": 0.1,
+    "target_mano_joint_pos_wf": 5.0, "target_mano_joint_rot6d_wf": 1.0,
+    "target_wrist_pos_wf": 10.0, "target_wrist_rotvec_wf": 3.0,
     "target_wrist_vel_wf": 10.0, "target_wrist_ang_vel_wf": 1.0,
-    "target_object_pos_wf": 5.0, "target_object_quat_wf": 1.0,
-    "target_object_vel_wf": 10.0, "target_object_ang_vel_wf": 1.0,
+    "target_object_pos_wf": 5.0, "target_delta_object_pos_wf": 10.0, "target_object_rot6d_wf": 1.0, "target_delta_object_rotvec_wf": 2.0,
+    "target_object_vel_wf": 10.0, "target_object_ang_vel_wf": 0.5,
 }
 
 WUJI_JOINT_MAPPING = {
@@ -294,15 +300,15 @@ EnvArgsRegistry["single_hand_retargeting_tactile_map_xarm"] = SingleHandRetarget
     actor_obs_terms=[
         *TARGET_MOTION_TERMS_TACTILE_MAP,
         *PROPRIO_TERMS_TACTILE_MAP_XARM,
-        "tactile_map_flat",
+        "tactile_map_norm_flat",
         "target_action_flat",
     ],
     critic_obs_terms=[
         *TARGET_MOTION_TERMS_TACTILE_MAP,
         *PROPRIO_TERMS_TACTILE_MAP_XARM,
         "last_reward",
-        "tactile_map_flat",
-        "target_tactile_map_flat",
+        "tactile_map_norm_flat",
+        "target_tactile_map_norm_flat",
         "action_proprio_history_flat",
         "target_action_flat",
     ],
@@ -317,13 +323,15 @@ EnvArgsRegistry["single_hand_retargeting_tactile_map_xarm_wf"] = EnvArgsRegistry
     update={
         "robot_args": RobotArgsRegistry["xarm_wuji_hand_wrist_ctrl"],
         "wrist_frame_obs": True,
+        # SE(2) + motion-scale augmentation of the whole reference (wrist, fingertips, object).
+        "trajectory_augmentation": TrajectoryAugmentationConfig(enabled=True),
         "proprio_terms": PROPRIO_TERMS_TACTILE_MAP_XARM_WF,
         "target_motion_terms": TARGET_MOTION_TERMS_TACTILE_MAP_WF,
         "actor_obs_terms": [
             *TARGET_MOTION_TERMS_TACTILE_MAP_WF,
             *PROPRIO_TERMS_TACTILE_MAP_XARM_WF,
-            "tactile_map_flat",
-            "target_tactile_map_flat",
+            "tactile_map_norm_flat",
+            "target_tactile_map_norm_flat",
             "action_proprio_history_flat",
             "target_action_flat",
         ],
@@ -331,8 +339,8 @@ EnvArgsRegistry["single_hand_retargeting_tactile_map_xarm_wf"] = EnvArgsRegistry
             *TARGET_MOTION_TERMS_TACTILE_MAP_WF,
             *PROPRIO_TERMS_TACTILE_MAP_XARM_WF,
             "last_reward",
-            "tactile_map_flat",
-            "target_tactile_map_flat",
+            "tactile_map_norm_flat",
+            "target_tactile_map_norm_flat",
             "action_proprio_history_flat",
             "target_action_flat",
         ],
