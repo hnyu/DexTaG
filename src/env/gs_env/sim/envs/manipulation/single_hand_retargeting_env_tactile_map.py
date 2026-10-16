@@ -357,14 +357,15 @@ class SingleHandRetargetingEnvTactileMap(BaseEnv):
         # == Process trajectory data for RL training ==
         self._process_trajectory_data()
 
-        # Apply object physics overrides from ObjectConfig
+        # Apply object physics overrides from ObjectConfig.
+        # self._object_mass (num_envs, 1) is the single source of truth for the object mass: it is
+        # built here, randomized in place, and written to the solver only by _apply_object_mass().
+        # Never read it back with get_mass(): for a non-heterogeneous entity that returns the
+        # build-time mesh mass (volume * rho) and ignores set_links_inertial_mass().
         if obj_cfg.mass is not None:
-            print(f"Setting object mass to {obj_cfg.mass}")
-            if self._object._enable_heterogeneous:
-                mass_tensor = torch.full((self.num_envs, 1), obj_cfg.mass, device=self._device)
-            else:
-                mass_tensor = torch.tensor([obj_cfg.mass], device=self._device)
-            self._object.set_links_inertial_mass(mass_tensor, links_idx_local=[0])
+            self._object_mass = torch.full((self.num_envs, 1), obj_cfg.mass, device=self._device)
+        else:
+            self._object_mass = self._read_object_mass()
         if any(v != 0.0 for v in obj_cfg.com_shift):
             print(f"Setting object COM shift to {obj_cfg.com_shift}")
             self._object.set_COM_shift(
@@ -372,6 +373,7 @@ class SingleHandRetargetingEnvTactileMap(BaseEnv):
             )
         if args.object_domain_randomization and not eval_mode:
             self._object_domain_randomization()
+        self._apply_object_mass()
 
         # == Random perturbation setup ==
         self._perturbation_force_scale = obj_cfg.perturbation_force_scale if not eval_mode else 0.0
@@ -398,13 +400,6 @@ class SingleHandRetargetingEnvTactileMap(BaseEnv):
         self._table_surface_z = self._table_top_z if np.any(self._trajectory_offset != 0.0) else 0.0
 
         if self._perturbation_force_scale > 0.0 or self._perturbation_torque_scale > 0.0:
-            # Cache object mass for mass-scaled forces
-            raw_mass = self._object.get_mass()
-            if isinstance(raw_mass, (int, float)):
-                self._object_mass = torch.full((self.num_envs, 1), raw_mass, device=self._device)
-            else:
-                self._object_mass = torch.tensor(raw_mass, device=self._device).reshape(self.num_envs, 1)
-
             # Global link index for the scene rigid solver (not entity-local)
             self._object_link_idx = self._object.links[0].idx
 
@@ -1048,25 +1043,42 @@ class SingleHandRetargetingEnvTactileMap(BaseEnv):
         self.reset_buf[envs_idx] = 0
 
 
+    def _read_object_mass(self) -> torch.Tensor:
+        """Per-env object mass the solver simulates with, shape (num_envs, 1)."""
+        mass = torch.as_tensor(
+            self._object.get_links_inertial_mass(links_idx_local=[0]), dtype=torch.float32, device=self._device
+        )
+        return mass.reshape(-1, 1).expand(self.num_envs, 1).clone()
+
+    def _apply_object_mass(self) -> None:
+        """Write self._object_mass to the solver and check that the solver now uses it."""
+        self._object.set_links_inertial_mass(self._object_mass, links_idx_local=[0])
+        applied = self._read_object_mass()
+        if not torch.allclose(applied, self._object_mass, rtol=1e-4):
+            raise RuntimeError(
+                "Object mass in the solver does not match self._object_mass "
+                f"(solver {applied.flatten()[:4].tolist()} vs intended {self._object_mass.flatten()[:4].tolist()}). "
+                "Per-env masses need batch_links_info=True in the scene's rigid options."
+            )
+        print(
+            f"Object mass: {self._object_mass.min().item() * 1000:.1f}-"
+            f"{self._object_mass.max().item() * 1000:.1f} g across {self.num_envs} envs"
+        )
+
     def _object_domain_randomization(self) -> None:
         obj_cfg = self._args.object_config
         mass_range = obj_cfg.mass_randomization_range
         friction_lo, friction_hi = obj_cfg.friction_range
 
-        # randomize object mass (per-env absolute mass via set_links_inertial_mass)
-        raw_mass = self._object.get_mass()  # numpy array or scalar
-        if isinstance(raw_mass, (int, float)):
-            obj_mass = torch.full((self.num_envs, 1), raw_mass, device=self._device)
-        else:
-            obj_mass = torch.tensor(raw_mass, device=self._device).reshape(self.num_envs, 1)
+        # randomize object mass in place around its nominal value (the caller writes it to the solver)
         perm = torch.randperm(self.num_envs, device=self._device)
         n_lower = self.num_envs // 2
+        mass_factor = torch.empty((self.num_envs, 1), device=self._device)
         # lower half: mass * (1 - mass_range) to mass
-        lower_mass = obj_mass[perm[:n_lower]] * (1.0 - mass_range * torch.rand(n_lower, 1, device=self._device))
+        mass_factor[perm[:n_lower]] = 1.0 - mass_range * torch.rand(n_lower, 1, device=self._device)
         # upper half: mass to mass * (1 + mass_range)
-        upper_mass = obj_mass[perm[n_lower:]] * (1.0 + mass_range * torch.rand(self.num_envs - n_lower, 1, device=self._device))
-        random_mass = torch.cat([lower_mass, upper_mass], dim=0)
-        self._object.set_links_inertial_mass(random_mass, links_idx_local=[0], envs_idx=perm)
+        mass_factor[perm[n_lower:]] = 1.0 + mass_range * torch.rand(self.num_envs - n_lower, 1, device=self._device)
+        self._object_mass = self._object_mass * mass_factor
 
         # randomize object friction
         friction_perm = torch.randperm(self.num_envs, device=self._device)
