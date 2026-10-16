@@ -12,7 +12,6 @@ import glob
 import os
 import platform
 import shutil
-from datetime import datetime
 from pathlib import Path
 from typing import Any
 
@@ -34,6 +33,7 @@ from utils import (
     apply_overrides_generic,
     config_to_yaml,
     seed_everything,
+    snapshot_code,
     yaml_to_config,
 )
 
@@ -494,7 +494,6 @@ def train_policy(
 
     # Load checkpoint if resuming training
     start_iteration = 0
-    resume_from_dir = None
     ckpt_path = None
     if resume_checkpoint is not None:
         if resume_checkpoint == "latest":
@@ -539,26 +538,10 @@ def train_policy(
         env.training_step = bc_algo.training_step
         print(f"Synced environment training_step to {env.training_step}")
 
-        # When resuming, use the same directory as the checkpoint
-        resume_from_dir = ckpt_path.parent.parent  # Go up from checkpoints/ to experiment dir
-        print(f"Resuming will continue in directory: {resume_from_dir}")
-
-        # Update the runner's checkpoint directory to use the resumed location
-        runner.save_dir = resume_from_dir
-        runner.checkpoint_dir = resume_from_dir / "checkpoints"
-        print(f"Checkpoints will be saved to: {runner.checkpoint_dir}")
-
-    # Set up logging
-    if exp_name is not None:
-        save_path = Path(f"./logs/{exp_name}")
-    else:
-        save_path = runner_args.save_path
-
-    # Use existing directory when resuming, or create new timestamped one for fresh training
-    if resume_from_dir is not None:
-        logger_folder = resume_from_dir
-    else:
-        logger_folder = save_path / datetime.now().strftime("%Y%m%d_%H%M%S")
+    # Log into the runner's new timestamped run folder, also when resuming (the resumed run's
+    # folder is left untouched; later checkpoints go to the new folder)
+    logger_folder = runner.save_dir
+    print(f"Checkpoints will be saved to: {runner.checkpoint_dir}")
     logger = logger_configure(
         folder=str(logger_folder),
         format_strings=["stdout", "csv", "wandb"],
@@ -580,6 +563,9 @@ def train_policy(
     shutil.copy(teacher_config_path, config_dir / "teacher_env_args.yaml")
     print(f"Saved teacher config to: {config_dir / 'teacher_env_args.yaml'}")
     print("Note: BC uses teacher observations for teacher policy, student observations for student.")
+
+    # Snapshot the code being run into the run folder
+    print(f"Code snapshot saved to {snapshot_code(logger_folder)}")
 
     # Train
     print("Starting BC training...")

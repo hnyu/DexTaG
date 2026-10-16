@@ -11,7 +11,6 @@ gs.init(performance_mode=True, backend=getattr(gs.constants.backend, "cuda"))
 import glob
 import os
 import platform
-from datetime import datetime
 from pathlib import Path
 from typing import Any
 
@@ -30,7 +29,7 @@ from gs_agent.utils.logger import configure as logger_configure
 from gs_agent.utils.policy_loader import load_latest_model
 from gs_agent.wrappers.gs_env_wrapper import GenesisEnvWrapper
 from gs_env.sim.envs.config.registry import EnvArgsRegistry, OBJECT_REGISTRY
-from utils import apply_overrides_generic, config_to_yaml, seed_everything
+from utils import apply_overrides_generic, config_to_yaml, seed_everything, snapshot_code
 
 
 # PPO config (network input layout) for each env entry; PPO_HAND_IMITATOR_TACTILE_MAP_XARM otherwise
@@ -570,7 +569,6 @@ def train_policy(
 
     # Load checkpoint if resuming training
     start_iteration = 0
-    resume_from_dir = None
     ckpt_path = None
     if resume_checkpoint is not None:
         if resume_checkpoint == "latest":
@@ -612,26 +610,10 @@ def train_policy(
         env.training_step = start_iteration
         print(f"Synced environment training_step to {start_iteration}")
 
-        # When resuming, use the same directory as the checkpoint
-        resume_from_dir = ckpt_path.parent.parent  # Go up from checkpoints/ to experiment dir
-        print(f"Resuming will continue in directory: {resume_from_dir}")
-
-        # Update the runner's checkpoint directory to use the resumed location
-        runner.save_dir = resume_from_dir
-        runner.checkpoint_dir = resume_from_dir / "checkpoints"
-        print(f"Checkpoints will be saved to: {runner.checkpoint_dir}")
-
-    # Set up logging with proper configuration
-    if exp_name is not None:
-        save_path = Path(f"./logs/{exp_name}")
-    else:
-        save_path = runner_args.save_path
-
-    # Use existing directory when resuming, or create new timestamped one for fresh training
-    if resume_from_dir is not None:
-        logger_folder = resume_from_dir
-    else:
-        logger_folder = save_path / datetime.now().strftime("%Y%m%d_%H%M%S")
+    # Log into the runner's new timestamped run folder, also when resuming (the resumed run's
+    # folder is left untouched; later checkpoints go to the new folder)
+    logger_folder = runner.save_dir
+    print(f"Checkpoints will be saved to: {runner.checkpoint_dir}")
     logger = logger_configure(
         folder=str(logger_folder),
         format_strings=["stdout", "csv", "wandb"],
@@ -648,6 +630,9 @@ def train_policy(
     config_to_yaml(env_args, config_dir / "env_args.yaml")
     config_to_yaml(algo_cfg, config_dir / "algo_cfg.yaml")
     config_to_yaml(runner_args, config_dir / "runner_args.yaml")
+
+    # Snapshot the code being run into the run folder
+    print(f"Code snapshot saved to {snapshot_code(logger_folder)}")
 
     # Train using Runner
     print("Starting training...")

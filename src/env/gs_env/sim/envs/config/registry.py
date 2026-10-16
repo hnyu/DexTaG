@@ -296,8 +296,8 @@ EnvArgsRegistry["single_hand_retargeting_tactile_map_xarm"] = SingleHandRetarget
     table_contact_threshold_2=50,
 
     # Training-only crutch: pulls the object along the reference, decaying to zero over
-    # decay_steps. Skipped entirely when eval_mode=True.
-    object_guide_force_decay_steps=5000,
+    # decay_steps. Skipped entirely when eval_mode=True. Off by default (0).
+    object_guide_force_decay_steps=0,
     object_guide_force_kp=5.0,
 
     # Tactile sensor contact params (geometry paths now on robot_args)

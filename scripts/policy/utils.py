@@ -1,4 +1,5 @@
 import random
+import tarfile
 from pathlib import Path
 from typing import Any
 
@@ -298,3 +299,30 @@ def yaml_to_config(yaml_path: str | Path, config_class: type | None = None) -> A
     else:
         # Return as dictionary
         return config_dict
+
+
+# Repo root (scripts/policy/utils.py -> DexTaG/), and the code snapshotted into each run folder
+REPO_ROOT = Path(__file__).resolve().parents[2]
+SNAPSHOT_PATHS = ("src", "scripts", "train.sh", "eval.sh")
+SNAPSHOT_EXCLUDED_DIRS = ("__pycache__",)
+SNAPSHOT_EXCLUDED_SUFFIXES = (".pyc", ".egg-info")
+
+
+def snapshot_code(run_dir: str | Path) -> Path:
+    """Save the code being run (src, scripts, train.sh, eval.sh) to <run_dir>/DexTaG.tar.gz.
+
+    A resumed run overwrites the snapshot of the earlier run in the same folder.
+    """
+
+    def _filter(info: tarfile.TarInfo) -> tarfile.TarInfo | None:
+        name = Path(info.name).name
+        if name in SNAPSHOT_EXCLUDED_DIRS or name.endswith(SNAPSHOT_EXCLUDED_SUFFIXES):
+            return None
+        return info
+
+    snapshot_path = Path(run_dir) / "DexTaG.tar.gz"
+    with tarfile.open(snapshot_path, "w:gz") as tar:
+        for rel_path in SNAPSHOT_PATHS:
+            if (REPO_ROOT / rel_path).exists():
+                tar.add(REPO_ROOT / rel_path, arcname=rel_path, filter=_filter)
+    return snapshot_path
