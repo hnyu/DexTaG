@@ -8,6 +8,7 @@ from scipy.spatial.transform import Rotation as ScipyR
 
 from gs_env.common.utils.math_utils import (
     quat_from_angle_axis,
+    quat_mul,
     quat_to_angle_axis,
     rotmat_to_quat,
 )
@@ -392,6 +393,70 @@ def augment_trajectory(
             finger_joints_quat[joint_name] = q_new_xyzw[:, [3, 0, 1, 2]]
 
     return wrist_positions, wrist_rotations_aa, object_pose_matrices, finger_joints, finger_joints_quat
+
+
+def augment_reference_data(
+    data: dict[str, torch.Tensor],
+    translate_x: torch.Tensor,
+    translate_y: torch.Tensor,
+    rotate_z_deg: torch.Tensor,
+    scale: torch.Tensor,
+) -> dict[str, torch.Tensor]:
+    """Batched torch version of augment_trajectory, applied to already-processed reference data.
+
+    Same transform: scale the object's displacement from its first frame, keep the wrist and
+    fingertips at their offset from the object, then rotate about the world z axis and translate
+    in xy. Velocities come from linear operations on positions (finite differences + Gaussian
+    smoothing), so they transform exactly like the positions; angular velocities are world-frame
+    and just rotate. Hand DOFs and tactile maps are intrinsic and pass through unchanged.
+
+    Args:
+        data: per-trajectory tensors (n, T, ...) with the processed keys (wrist_pos, wrist_quat,
+            wrist_vel, wrist_ang_vel, obj_pos, obj_quat, obj_vel, obj_ang_vel, mano_joint_poses,
+            mano_joint_velocities, mano_joint_quats; other keys are passed through). Quats are
+            [w, x, y, z].
+        translate_x, translate_y, rotate_z_deg, scale: (n,) augmentation parameters.
+
+    Returns:
+        A new dict with the augmented tensors. The axis-angle "wrist_rot" is dropped if present.
+    """
+    n = scale.shape[0]
+    theta = torch.deg2rad(rotate_z_deg)
+    cos, sin = torch.cos(theta), torch.sin(theta)
+    zeros, ones = torch.zeros_like(theta), torch.ones_like(theta)
+    rot_z = torch.stack([cos, -sin, zeros, sin, cos, zeros, zeros, zeros, ones], dim=-1).reshape(n, 3, 3)
+    quat_z = torch.stack([torch.cos(theta / 2), zeros, zeros, torch.sin(theta / 2)], dim=-1)  # (n, 4)
+    translation = torch.stack([translate_x, translate_y, zeros], dim=-1)  # (n, 3)
+
+    def rotate(v: torch.Tensor) -> torch.Tensor:  # (n, ..., 3)
+        return torch.einsum("nij,nkj->nki", rot_z, v.reshape(n, -1, 3)).reshape(v.shape)
+
+    def rotate_quat(q: torch.Tensor) -> torch.Tensor:  # (n, ..., 4)
+        return quat_mul(quat_z.reshape(n, *([1] * (q.dim() - 2)), 4).expand_as(q), q)
+
+    def translate(v: torch.Tensor) -> torch.Tensor:  # (n, ..., 3)
+        return v + translation.reshape(n, *([1] * (v.dim() - 2)), 3)
+
+    out = dict(data)
+    out.pop("wrist_rot", None)
+    sc = scale.reshape(n, 1, 1)
+    obj_pos, obj_vel = data["obj_pos"], data["obj_vel"]  # (n, T, 3)
+    obj_disp = obj_pos - obj_pos[:, :1]
+    # The wrist and fingertips keep their offset from the (scaled) object
+    hand_shift, hand_vel_shift = (sc - 1) * obj_disp, (sc - 1) * obj_vel
+
+    out["obj_pos"] = translate(rotate(obj_pos[:, :1] + sc * obj_disp))
+    out["obj_vel"] = rotate(sc * obj_vel)
+    out["obj_ang_vel"] = rotate(data["obj_ang_vel"])
+    out["obj_quat"] = rotate_quat(data["obj_quat"])
+    out["wrist_pos"] = translate(rotate(data["wrist_pos"] + hand_shift))
+    out["wrist_vel"] = rotate(data["wrist_vel"] + hand_vel_shift)
+    out["wrist_ang_vel"] = rotate(data["wrist_ang_vel"])
+    out["wrist_quat"] = rotate_quat(data["wrist_quat"])
+    out["mano_joint_poses"] = translate(rotate(data["mano_joint_poses"] + hand_shift.unsqueeze(2)))
+    out["mano_joint_velocities"] = rotate(data["mano_joint_velocities"] + hand_vel_shift.unsqueeze(2))
+    out["mano_joint_quats"] = rotate_quat(data["mano_joint_quats"])
+    return out
 
 
 def validate_on_table(

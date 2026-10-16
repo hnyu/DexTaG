@@ -71,20 +71,26 @@ TARGET_MOTION_TERMS_TACTILE_MAP = [
 
 # Wrist-frame variants (see WRIST_FRAME_TERMS in the env): everything relative to the current
 # wrist pose (including the gravity direction), plus the table-top height relative to the wrist;
-# no absolute wrist pose or arm joint state. Proprio has no hand joint, wrist or object
-# velocities: the history carries the past motion.
+# no absolute wrist pose or arm joint state. Proprio has hand joint and object velocities but no
+# wrist velocities: the history carries the past wrist motion.
 PROPRIO_TERMS_TACTILE_MAP_XARM_WF = [
     "hand_dof_pos",        # 20
+    "hand_dof_vel",        # 20
+    "finger_link_pos_wf",  # 15
+    "finger_link_rot6d_wf",  # 30
     "object_pos_wf",       # 3
     "fingertip_to_surface_dist",  # 5
     "object_rot6d_wf",     # 6
+    "object_lin_vel_wf",   # 3
+    "object_ang_vel_wf",   # 3
     "table_contact_force_magnitude",  # 1
     "gravity_wf",          # 3
     "table_height_rel",    # 1 (table-top z minus wrist z)
-]  # total = 39
+]  # total = 110
 
 TARGET_MOTION_TERMS_TACTILE_MAP_WF = [
     "target_hand_dof_pos",       # 20
+    "target_hand_dof_vel",       # 20
     "target_mano_joint_pos_wf",  # 15
     "target_mano_joint_rot6d_wf",  # 30
     "target_wrist_pos_wf",       # 3
@@ -95,7 +101,7 @@ TARGET_MOTION_TERMS_TACTILE_MAP_WF = [
     "target_delta_object_rotvec_wf", # 3 (target relative to current object rotation)
     "target_object_vel_wf",      # 3
     "target_object_ang_vel_wf",  # 3
-]  # total = 89
+]  # total = 109
 
 BASE_OBS_SCALES = {
     "hand_dof_pos": 1.0, "hand_dof_vel": 1.0,

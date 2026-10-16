@@ -29,7 +29,7 @@ from gs_env.common.utils.math_utils import (
 )
 from gs_env.common.utils.misc_utils import get_space_dim
 from gs_env.sim.envs.config.schema import SingleHandRetargetingEnvArgs
-from gs_env.sim.envs.manipulation.trajectory_utils import augment_trajectory, pad_and_stack, process_trajectory_data_tactile_map, query_object_sdf, resample_trajectory_lists, validate_on_table
+from gs_env.sim.envs.manipulation.trajectory_utils import augment_reference_data, pad_and_stack, process_trajectory_data_tactile_map, query_object_sdf, resample_trajectory_lists
 from gs_env.sim.robots.config.schema import CtrlType
 from gs_env.sim.robots.manipulators import XArmWUJIHand
 from gs_env.sim.scenes import FlatScene
@@ -601,17 +601,8 @@ class SingleHandRetargetingEnvTactileMap(BaseEnv):
             time_delta=time_delta,
         )
 
-        # Move template to CPU to save GPU memory
-        for key in self._traj_data_template:
-            self._traj_data_template[key] = self._traj_data_template[key].cpu()
-
-        # Build augmented per-env trajectory data if enabled
-        aug_cfg = self._args.trajectory_augmentation
-        if aug_cfg.enabled and not self._eval_mode:
-            self._traj_data_augmented, self._augmented_traj_lengths = self._build_augmented_trajectories(aug_cfg)
-        else:
-            self._traj_data_augmented = None
-            self._augmented_traj_lengths = None
+        # The template stays on the device: every reset indexes (and augments) it there
+        self._traj_lengths_t = torch.as_tensor(self._traj_lengths, dtype=torch.long, device=self._device)
 
         # Get the corresponding link idx for fingertips (MANO tracking)
         self._finger_link_idxs = []
@@ -645,127 +636,60 @@ class SingleHandRetargetingEnvTactileMap(BaseEnv):
             np.stack(tactile_center_offsets, axis=0), dtype=torch.float32, device=self._device,
         )
 
-    def _build_augmented_trajectories(self, aug_cfg):
-        """Create per-env augmented trajectories from the raw numpy data.
+    def _sample_augmentation(self, obj_start_pos: torch.Tensor, aug_cfg) -> tuple[torch.Tensor, ...]:
+        """Sample trajectory augmentation parameters (translate_x, translate_y, rotate_z_deg, scale),
+        one set per reference, each of shape (n,).
 
-        For each of num_envs environments, picks its round-robin base trajectory,
-        applies random augmentation, validates that the object stays on the table,
-        then processes through the full pipeline on CPU.
-
-        Returns (traj_data_augmented dict on CPU, augmented_traj_lengths tensor).
+        Rejection-samples so that the augmented first object position stays on the table (with a
+        5 cm margin); references that fail every retry are left unaugmented.
         """
-        num_envs = self._num_envs
-        num_traj = self._num_trajectories
-        max_T = self._max_traj_length
-
-        # Round-robin assignment (same as _init)
-        env_traj_idx = np.array([i % num_traj for i in range(num_envs)])
-
-        # Table bounds for validation
+        n, dev = obj_start_pos.shape[0], obj_start_pos.device
         off = self._trajectory_offset
-        table_x_range = (off[0] + 0.2, off[0] + 0.8)
-        table_y_range = (off[1] - 0.5, off[1] + 0.5)
+        x_lo, x_hi = off[0] + 0.2 + 0.05, off[0] + 0.8 - 0.05
+        y_lo, y_hi = off[1] - 0.5 + 0.05, off[1] + 0.5 - 0.05
 
-        # Pre-allocate augmented arrays
-        aug_wrist_pos = np.zeros((num_envs, max_T, 3), dtype=np.float64)
-        aug_wrist_rot = np.zeros((num_envs, max_T, 3), dtype=np.float64)
-        aug_dof_pos = np.zeros_like(self._dof_positions[:1]).repeat(num_envs, axis=0)
-        aug_obj_pose = np.zeros((num_envs, max_T, 4, 4), dtype=np.float64)
-        aug_tactile = np.zeros_like(self._tactile_maps[:1]).repeat(num_envs, axis=0)
-        aug_demo_data = []
-        aug_traj_lengths = np.zeros(num_envs, dtype=np.int64)
+        def uniform(lo_hi: tuple[float, float], size: int) -> torch.Tensor:
+            return lo_hi[0] + (lo_hi[1] - lo_hi[0]) * torch.rand(size, device=dev)
 
-        n_valid = 0
-        n_rejected = 0
-        max_retries = 10
+        params = torch.zeros(4, n, device=dev)
+        params[3] = 1.0
+        pending = torch.ones(n, dtype=torch.bool, device=dev)
+        for _ in range(10):
+            k = int(pending.sum())
+            if k == 0:
+                break
+            tx, ty = uniform(aug_cfg.translate_x_range, k), uniform(aug_cfg.translate_y_range, k)
+            rz, sc = uniform(aug_cfg.rotate_z_range, k), uniform(aug_cfg.scale_range, k)
+            # First frame: the scaled displacement is zero, so only the rotation and translation apply
+            theta = torch.deg2rad(rz)
+            p = obj_start_pos[pending]
+            x = torch.cos(theta) * p[:, 0] - torch.sin(theta) * p[:, 1] + tx
+            y = torch.sin(theta) * p[:, 0] + torch.cos(theta) * p[:, 1] + ty
+            ok = (x >= x_lo) & (x <= x_hi) & (y >= y_lo) & (y <= y_hi)
+            idx = pending.nonzero(as_tuple=True)[0][ok]
+            params[:, idx] = torch.stack([tx, ty, rz, sc])[:, ok]
+            pending[idx] = False
+        return tuple(params)
 
-        for env_idx in range(num_envs):
-            traj_idx = env_traj_idx[env_idx]
-            traj_len = self._traj_lengths[traj_idx]
-            aug_traj_lengths[env_idx] = traj_len
-
-            # Copy base arrays
-            aug_dof_pos[env_idx] = self._dof_positions[traj_idx]
-            aug_tactile[env_idx] = self._tactile_maps[traj_idx]
-
-            # Deep copy MANO reference for this env
-            base_demo = self._demo_data_raw[traj_idx]
-            demo_entry = {
-                "mano_reference": {
-                    "finger_joints": {k: v.copy() for k, v in base_demo["mano_reference"]["finger_joints"].items()},
-                    "finger_joints_quat": {k: v.copy() for k, v in base_demo["mano_reference"]["finger_joints_quat"].items()},
-                }
-            }
-
-            # Sample and augment with rejection sampling
-            for retry in range(max_retries):
-                tx = np.random.uniform(*aug_cfg.translate_x_range)
-                ty = np.random.uniform(*aug_cfg.translate_y_range)
-                rz = np.random.uniform(*aug_cfg.rotate_z_range)
-                sc = np.random.uniform(*aug_cfg.scale_range)
-
-                # Copy base trajectory data trimmed to actual length (fresh each retry)
-                wrist_pos = self._wrist_positions[traj_idx, :traj_len].copy()
-                wrist_rot = self._wrist_rotations_aa[traj_idx, :traj_len].copy()
-                obj_pose = self._obj_pose_matrices[traj_idx, :traj_len].copy()
-                fj = {k: v.copy() for k, v in base_demo["mano_reference"]["finger_joints"].items()}
-                fq = {k: v.copy() for k, v in base_demo["mano_reference"]["finger_joints_quat"].items()}
-
-                aug_wp, aug_wr, aug_op, aug_fj, aug_fq = augment_trajectory(
-                    wrist_pos, wrist_rot, obj_pose,
-                    finger_joints=fj, finger_joints_quat=fq,
-                    translate_x=tx, translate_y=ty, rotate_z_deg=rz, scale=sc,
-                )
-
-                if validate_on_table(aug_op[0], table_x_range, table_y_range):
-                    break
-                n_rejected += 1
-            else:
-                # All retries failed — use unaugmented
-                aug_wp = self._wrist_positions[traj_idx, :traj_len].copy()
-                aug_wr = self._wrist_rotations_aa[traj_idx, :traj_len].copy()
-                aug_op = self._obj_pose_matrices[traj_idx, :traj_len].copy()
-                aug_fj = {k: v.copy() for k, v in base_demo["mano_reference"]["finger_joints"].items()}
-                aug_fq = {k: v.copy() for k, v in base_demo["mano_reference"]["finger_joints_quat"].items()}
-
-            # Pad augmented arrays back to max_T (repeat last frame)
-            aug_wrist_pos[env_idx, :traj_len] = aug_wp
-            aug_wrist_pos[env_idx, traj_len:] = aug_wp[-1]
-            aug_wrist_rot[env_idx, :traj_len] = aug_wr
-            aug_wrist_rot[env_idx, traj_len:] = aug_wr[-1]
-            aug_obj_pose[env_idx, :traj_len] = aug_op
-            aug_obj_pose[env_idx, traj_len:] = aug_op[-1]
-
-            # Store augmented MANO data (unpadded, trimmed to original length)
-            for jn in aug_fj:
-                demo_entry["mano_reference"]["finger_joints"][jn] = aug_fj[jn]
-            for jn in aug_fq:
-                demo_entry["mano_reference"]["finger_joints_quat"][jn] = aug_fq[jn]
-            aug_demo_data.append(demo_entry)
-
-            n_valid += 1
-
-        print(f"Trajectory augmentation: {n_valid} envs augmented, {n_rejected} rejections")
-
-        # Process augmented data through the pipeline on CPU to avoid GPU memory spike
-        traj_data_augmented, _ = process_trajectory_data_tactile_map(
-            aug_wrist_pos,
-            aug_wrist_rot,
-            aug_dof_pos,
-            aug_obj_pose,
-            aug_tactile,
-            aug_demo_data,
-            self._args.joint_mapping,
-            torch.device("cpu"),
-        )
-
-        augmented_traj_lengths = torch.tensor(aug_traj_lengths, dtype=torch.long)
-        return traj_data_augmented, augmented_traj_lengths
+    def _sample_references(self, envs_idx: torch.Tensor) -> None:
+        """Training: give each env a reference trajectory sampled uniformly from all of them,
+        with a fresh random augmentation when trajectory augmentation is enabled, and load it
+        into the env's reference buffers. Called at init and at every reset.
+        """
+        traj_idx = torch.randint(self._num_trajectories, (len(envs_idx),), device=self._device)
+        data = {key: self._traj_data_template[key][traj_idx] for key in self._traj_data}
+        aug_cfg = self._args.trajectory_augmentation
+        if aug_cfg.enabled:
+            data = augment_reference_data(data, *self._sample_augmentation(data["obj_pos"][:, 0], aug_cfg))
+        for key in self._traj_data:
+            self._traj_data[key][envs_idx] = data[key]
+        self.env_traj_idx[envs_idx] = traj_idx
+        self.env_traj_lengths[envs_idx] = self._traj_lengths_t[traj_idx]
 
     def _init(self) -> None:
         """Initialize observation and action spaces and environment buffers."""
 
-        # Assign trajectories to environments round-robin
+        # Assign trajectories to environments round-robin (training resamples them in _init below)
         self.env_traj_idx = torch.tensor(
             [i % self._num_trajectories for i in range(self.num_envs)],
             dtype=torch.long,
@@ -799,18 +723,13 @@ class SingleHandRetargetingEnvTactileMap(BaseEnv):
         }
 
         # Initialize with trajectory data
-        if self._traj_data_augmented is not None:
-            # Use pre-computed augmented per-env data (CPU -> GPU)
-            for key in self._traj_data.keys():
-                self._traj_data[key] = self._traj_data_augmented[key].to(self._device)
-            self.env_traj_lengths = self._augmented_traj_lengths.to(self._device)
+        if not self._eval_mode:
+            # Training: a random (augmented) reference per env, resampled at every reset
+            self._sample_references(torch.arange(self.num_envs, device=self._device))
         else:
-            # Copy from template (CPU -> GPU) based on env_traj_idx
-            env_traj_idx_cpu = self.env_traj_idx.cpu()
-            for env_idx in range(self.num_envs):
-                traj_idx = env_traj_idx_cpu[env_idx]
-                for key in self._traj_data.keys():
-                    self._traj_data[key][env_idx] = self._traj_data_template[key][traj_idx].to(self._device)
+            # Eval: round-robin, unaugmented (copy from template)
+            for key in self._traj_data.keys():
+                self._traj_data[key][:] = self._traj_data_template[key][self.env_traj_idx]
 
         # Current index into the trajectory timeline
         self.progress_buf = torch.zeros(self.num_envs, dtype=torch.long, device=self._device)
@@ -1035,8 +954,9 @@ class SingleHandRetargetingEnvTactileMap(BaseEnv):
     def reset_idx(self, envs_idx: torch.IntTensor) -> None:
         """Reset the given environments to the first frame of their trajectory.
 
-        Training applies initial-pose noise to the object; eval advances each
-        env to the next reference trajectory instead.
+        Training samples a new reference trajectory (with a fresh augmentation, and
+        initial-pose noise on the object if configured); eval advances each env to the
+        next reference trajectory instead.
         """
         if len(envs_idx) == 0:
             return
@@ -1058,17 +978,15 @@ class SingleHandRetargetingEnvTactileMap(BaseEnv):
             # if in eval mode, select reference trajectory in a rotation manner
             assert num_reset == 1, "Eval mode only supports resetting one env at a time."
             reset_traj_idx = (reset_traj_idx + 1) % self._num_trajectories
-            reset_traj_lengths = torch.tensor(
-                [self._traj_lengths[reset_traj_idx]],
-                dtype=torch.long,
-                device=self._device
-            )
+            reset_traj_lengths = self._traj_lengths_t[reset_traj_idx]
             self.env_traj_idx[envs_idx] = reset_traj_idx
             self.env_traj_lengths[envs_idx] = reset_traj_lengths
 
-            reset_traj_idx_cpu = reset_traj_idx.cpu()
             for key in self._traj_data.keys():
-                self._traj_data[key][envs_idx] = self._traj_data_template[key][reset_traj_idx_cpu].to(self._device)
+                self._traj_data[key][envs_idx] = self._traj_data_template[key][reset_traj_idx]
+        else:
+            # Training: sample a new reference trajectory (and augmentation) for every reset
+            self._sample_references(envs_idx)
 
         # Always start from beginning of trajectory
         seq_idx = torch.zeros(num_reset, dtype=torch.long, device=self._device)

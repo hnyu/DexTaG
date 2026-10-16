@@ -66,17 +66,17 @@ TEMPORAL_ENCODER_TACTILE_MAP_XARM_NO_HIST = TemporalEncoderConfig(
 # target tactile map.
 TEMPORAL_ENCODER_TACTILE_MAP_XARM_WF = TEMPORAL_ENCODER_TACTILE_MAP_XARM.model_copy(
     update={
-        "motion_dim": 89,             # 20 (hand dof pos) + 15+30 (5-tip pos+rot6d) + 3+3+3+3 (wrist) + 3+3+3+3 (object deltas+vels)
-        "proprio_dim": 40,            # 39 (wrist-frame proprio) + 1 (last_reward, critic only)
-        "history_dim": 520,           # 8 * 65
-        "history_per_step_dim": 65,   # 39 (proprio) + 26 (action: 6 wrist + 20 hand)
-        "future_dim": 1424,           # 16 * 89
-        "future_per_step_dim": 89,
+        "motion_dim": 109,            # 20+20 (hand dof pos/vel) + 15+30 (5-tip pos+rot6d) + 3+3+3+3 (wrist) + 3+3+3+3 (object deltas+vels)
+        "proprio_dim": 111,           # 110 (wrist-frame proprio) + 1 (last_reward, critic only)
+        "history_dim": 1088,          # 8 * 136
+        "history_per_step_dim": 136,  # 110 (proprio) + 26 (action: 6 wrist + 20 hand)
+        "future_dim": 1744,           # 16 * 109
+        "future_per_step_dim": 109,
     }
 )
 TEMPORAL_ENCODER_TACTILE_MAP_XARM_WF_ACTOR = TEMPORAL_ENCODER_TACTILE_MAP_XARM_WF.model_copy(
     update={
-        "proprio_dim": 39,  # no last_reward
+        "proprio_dim": 110,  # no last_reward
     }
 )
 

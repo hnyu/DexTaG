@@ -48,6 +48,7 @@ class PPO(BaseAlgo):
         self.current_iter = 0
         self._rewbuffer = deque(maxlen=_DEQUE_MAXLEN)
         self._lenbuffer = deque(maxlen=_DEQUE_MAXLEN)
+        self._successbuffer = deque(maxlen=_DEQUE_MAXLEN)  # 1.0 per succeeded episode, else 0.0
         self._per_env_lenbuffer = [deque(maxlen=_PER_ENV_DEQUE_MAXLEN) for _ in range(self._num_envs)]
         self._curr_reward_sum = torch.zeros(
             self.env.num_envs, device=self.device, dtype=torch.float
@@ -169,6 +170,11 @@ class PPO(BaseAlgo):
                         self._curr_reward_sum[new_ids][:, 0].cpu().numpy().tolist()
                     )
                     self._lenbuffer.extend(self._curr_ep_len[new_ids][:, 0].cpu().numpy().tolist())
+                    succeeded = _extra_infos.get("termination", {}).get("succeeded")
+                    if succeeded is not None:
+                        self._successbuffer.extend(
+                            succeeded[new_ids[:, 0]].float().cpu().numpy().tolist()
+                        )
                     # Per-env episode length tracking
                     for idx in new_ids[:, 0].cpu().numpy():
                         self._per_env_lenbuffer[idx].append(self._curr_ep_len[idx].item())
@@ -184,8 +190,12 @@ class PPO(BaseAlgo):
 
         mean_reward = 0.0
         mean_ep_len = 0.0
+        success_rate = 0.0
         if len(self._rewbuffer) > 0:
             mean_reward = statistics.mean(self._rewbuffer)
+        if len(self._successbuffer) > 0:
+            # Episode-level: fraction of the last episodes that ended by completing the trajectory
+            success_rate = statistics.mean(self._successbuffer)
         # Per-env mean episode length: average each env's recent mean
         per_env_means = [statistics.mean(buf) for buf in self._per_env_lenbuffer if len(buf) > 0]
         if per_env_means:
@@ -206,6 +216,7 @@ class PPO(BaseAlgo):
         return {
             "mean_reward": mean_reward,
             "mean_ep_len": mean_ep_len,
+            "success_rate": success_rate,
             "termination": mean_termination,
             "reward_terms": mean_reward_terms,
         }
@@ -329,6 +340,7 @@ class PPO(BaseAlgo):
             "rollout": {
                 "mean_reward": rollout_infos["mean_reward"],
                 "mean_length": rollout_infos["mean_ep_len"],
+                "success_rate": rollout_infos["success_rate"],
             },
             "train": {
                 "policy_loss": statistics.mean(
