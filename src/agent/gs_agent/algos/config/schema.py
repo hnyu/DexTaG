@@ -37,6 +37,10 @@ class PPOArgs(BaseModel):
     # Discount and GAE
     gamma: PositiveFloat = Field(default=0.98, ge=0, le=1)
     gae_lambda: PositiveFloat = Field(default=0.95, ge=0, le=1)
+    reward_scale: PositiveFloat = 1.0
+    """Multiplies env rewards before they enter the GAE buffer, so the critic learns values in
+    scaled units. Logged episode rewards stay unscaled. With normalized advantages this only
+    changes the critic's target scale, not the policy gradient."""
 
     # PPO specific
     clip_ratio: PositiveFloat = 0.2

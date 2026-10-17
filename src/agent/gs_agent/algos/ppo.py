@@ -131,7 +131,9 @@ class PPO(BaseAlgo):
             for _step in range(num_steps):
                 action, log_prob, mu, sigma = self._actor.forward_with_dist_params(actor_obs)
                 # Step environment
-                next_actor_obs, next_critic_obs, reward, terminated, truncated, _extra_infos = self.env.step(action)
+                next_actor_obs, next_critic_obs, env_reward, terminated, truncated, _extra_infos = self.env.step(action)
+                # The critic learns values of the scaled reward; episode stats use env_reward
+                reward = env_reward * self.cfg.reward_scale
 
                 # add next value to reward of truncated steps
                 if "time_outs" in _extra_infos:
@@ -154,7 +156,7 @@ class PPO(BaseAlgo):
                 self._rollouts.append(transition)
 
                 # Update episode tracking
-                self._curr_reward_sum += reward.squeeze(-1)
+                self._curr_reward_sum += env_reward.squeeze(-1)
                 self._curr_ep_len += 1
 
                 # Update termination buffer
@@ -267,6 +269,11 @@ class PPO(BaseAlgo):
         # Calculate value loss
         values = self._critic(critic_obs)
         value_loss = (returns - values).pow(2).mean()
+        # Fraction of the return variance the critic explains (1 = perfect, <= 0 = no better
+        # than predicting the mean). Uses the values predicted during the rollout (the ones GAE
+        # used), so later epochs fitting this same minibatch don't inflate it.
+        rollout_values = mini_batch[GAEBufferKey.VALUES]
+        explained_variance = 1.0 - (returns - rollout_values).var() / (returns.var() + 1e-8)
 
         # Calculate entropy loss
         entropy = self._actor.entropy_on(actor_obs)
@@ -293,6 +300,11 @@ class PPO(BaseAlgo):
         metrics = {
             "policy_loss": policy_loss.item(),
             "value_loss": value_loss.item(),
+            "explained_variance": explained_variance.item(),
+            # In reward_scale units, like the critic
+            "value_mean": rollout_values.mean().item(),
+            "value_std": rollout_values.std().item(),
+            "return_mean": returns.mean().item(),
             "entropy_loss": entropy_loss.item(),
             "log_ratio": log_ratio.item(),
             "kl_mean": kl_mean.item(),
@@ -349,6 +361,10 @@ class PPO(BaseAlgo):
                 "value_loss": statistics.mean(
                     [metrics["value_loss"] for metrics in train_metrics_list]
                 ),
+                **{
+                    key: statistics.mean([metrics[key] for metrics in train_metrics_list])
+                    for key in ("explained_variance", "value_mean", "value_std", "return_mean")
+                },
                 "entropy_loss": statistics.mean(
                     [metrics["entropy_loss"] for metrics in train_metrics_list]
                 ),

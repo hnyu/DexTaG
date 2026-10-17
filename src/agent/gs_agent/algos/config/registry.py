@@ -37,6 +37,8 @@ PPO_HAND_IMITATOR_TACTILE_MAP_XARM_WF = PPO_HAND_IMITATOR_TACTILE_MAP_XARM.model
     update={
         "policy_backbone": TEMPORAL_ENCODER_TACTILE_MAP_XARM_WF_ACTOR,
         "critic_backbone": TEMPORAL_ENCODER_TACTILE_MAP_XARM_WF,
+        # Raw values are ~300 (≈6 reward/step, gamma 0.98); scale them to ~3 for the critic
+        "reward_scale": 0.01,
     }
 )
 
