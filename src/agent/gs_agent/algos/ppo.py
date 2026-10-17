@@ -74,6 +74,8 @@ class PPO(BaseAlgo):
             policy_backbone=policy_backbone,
             action_dim=self._action_dim,
             initial_log_std=self.cfg.initial_log_std,
+            state_dependent_std=self.cfg.state_dependent_std,
+            log_std_bounds=self.cfg.log_std_bounds,
         ).to(self.device)
         self._actor_optimizer = torch.optim.Adam(self._actor.parameters(), lr=self._current_lr)
 
@@ -308,18 +310,24 @@ class PPO(BaseAlgo):
             "entropy_loss": entropy_loss.item(),
             "log_ratio": log_ratio.item(),
             "kl_mean": kl_mean.item(),
-            "mean_std": self._actor.action_std.mean().item(),
-            "max_std": self._actor.action_std.max().item(),
         }
-        # Per-group entropy and std (e.g. wrist vs hand). The std is state-independent, so the
-        # per-dim Gaussian entropy is 0.5 * ln(2*pi*e) + log_std.
+        # Std and entropy stats from this minibatch's sigma (B, action_dim), averaged over the
+        # batch per dim; for a state-independent std every row is the same. Per-dim Gaussian
+        # entropy is 0.5 * ln(2*pi*e) + log_std. std_state_spread is the std of sigma across
+        # states (0 for a state-independent std).
         with torch.no_grad():
-            dim_entropy = 0.5 * math.log(2 * math.pi * math.e) + self._actor.log_std
+            sigma = new_sigma.detach()
+            dim_std = sigma.mean(dim=0)
+            dim_entropy = 0.5 * math.log(2 * math.pi * math.e) + sigma.log().mean(dim=0)
+            dim_spread = sigma.std(dim=0) if sigma.shape[0] > 1 else torch.zeros_like(dim_std)
+            metrics["mean_std"] = dim_std.mean().item()
+            metrics["max_std"] = dim_std.max().item()
+            metrics["std_state_spread"] = dim_spread.mean().item()
             for name, idx in self._action_groups.items():
-                std = self._actor.action_std[idx]
                 metrics[f"entropy_{name}_per_dim"] = dim_entropy[idx].mean().item()
-                metrics[f"mean_std_{name}"] = std.mean().item()
-                metrics[f"max_std_{name}"] = std.max().item()
+                metrics[f"mean_std_{name}"] = dim_std[idx].mean().item()
+                metrics[f"max_std_{name}"] = dim_std[idx].max().item()
+                metrics[f"std_state_spread_{name}"] = dim_spread[idx].mean().item()
         return metrics
 
     def train_one_iteration(self) -> dict[str, Any]:
@@ -376,10 +384,18 @@ class PPO(BaseAlgo):
                     [metrics["mean_std"] for metrics in train_metrics_list]
                 ),
                 "max_std": statistics.mean([metrics["max_std"] for metrics in train_metrics_list]),
+                "std_state_spread": statistics.mean(
+                    [metrics["std_state_spread"] for metrics in train_metrics_list]
+                ),
                 **{
                     key: statistics.mean([metrics[key] for metrics in train_metrics_list])
                     for name in self._action_groups
-                    for key in (f"entropy_{name}_per_dim", f"mean_std_{name}", f"max_std_{name}")
+                    for key in (
+                        f"entropy_{name}_per_dim",
+                        f"mean_std_{name}",
+                        f"max_std_{name}",
+                        f"std_state_spread_{name}",
+                    )
                 },
                 "learning_rate": self._current_lr,
             },
@@ -414,6 +430,14 @@ class PPO(BaseAlgo):
     def load(self, path: Path, load_optimizer: bool = True) -> None:
         """Load the algorithm from a file."""
         checkpoint = torch.load(path, map_location=self.device)
+        ckpt_state_dependent = "log_std_head.weight" in checkpoint["model_state_dict"]
+        if ckpt_state_dependent != self.cfg.state_dependent_std:
+            # strict=False below would otherwise silently drop the std and keep its init value
+            raise ValueError(
+                f"Checkpoint {path} has state_dependent_std={ckpt_state_dependent}, but the PPO "
+                f"config has {self.cfg.state_dependent_std}; pass "
+                f"--algo.state_dependent_std={ckpt_state_dependent}."
+            )
         missing_actor = self._actor.load_state_dict(checkpoint["model_state_dict"], strict=False)
         if missing_actor.missing_keys:
             print(f"Actor: missing keys (using defaults): {missing_actor.missing_keys}")

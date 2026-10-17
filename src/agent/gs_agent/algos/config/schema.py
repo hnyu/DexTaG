@@ -60,6 +60,14 @@ class PPOArgs(BaseModel):
     """Initial value of the actor's log_std parameter. Default 0.0 gives std=1.0;
     log(0.5) ≈ -0.693 gives std=0.5."""
 
+    state_dependent_std: bool = False
+    """If True, the actor outputs log_std from a head on its features (state-dependent std,
+    initialized to initial_log_std everywhere) instead of one learned value per action dim.
+    Checkpoints only load into a policy with the same setting."""
+
+    log_std_bounds: tuple[float, float] = (-5.0, 0.5)
+    """(min, max) clamp on the state-dependent log_std."""
+
     critic_warmup_iters: NonNegativeInt = 0
     """Number of initial iterations during which the actor optimizer step is
     skipped (critic-only updates)."""

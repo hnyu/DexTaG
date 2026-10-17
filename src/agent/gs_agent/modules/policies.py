@@ -13,10 +13,24 @@ class GaussianPolicy(Policy):
         policy_backbone: NetworkBackbone,
         action_dim: int,
         initial_log_std: float = 0.0,
+        state_dependent_std: bool = False,
+        log_std_bounds: tuple[float, float] = (-5.0, 0.5),
     ) -> None:
+        """
+        Args:
+            state_dependent_std: If True, log_std comes from a linear head on the backbone
+                features (clamped to log_std_bounds) instead of one learned value per action dim.
+            log_std_bounds: (min, max) clamp for the state-dependent log_std.
+        """
         super().__init__(policy_backbone, action_dim)
         self.mu = nn.Linear(self.backbone.output_dim, self.action_dim)
-        self.log_std = nn.Parameter(torch.ones(self.action_dim) * initial_log_std)
+        self.state_dependent_std = state_dependent_std
+        self._log_std_bounds = log_std_bounds
+        self._initial_log_std = initial_log_std
+        if state_dependent_std:
+            self.log_std_head = nn.Linear(self.backbone.output_dim, self.action_dim)
+        else:
+            self.log_std = nn.Parameter(torch.ones(self.action_dim) * initial_log_std)
         Normal.set_default_validate_args(False)
 
         self._init_params()
@@ -24,6 +38,10 @@ class GaussianPolicy(Policy):
     def _init_params(self) -> None:
         nn.init.xavier_uniform_(self.mu.weight)
         nn.init.zeros_(self.mu.bias)
+        if self.state_dependent_std:
+            # Start state-independent at initial_log_std; the head learns any state dependence
+            nn.init.zeros_(self.log_std_head.weight)
+            nn.init.constant_(self.log_std_head.bias, self._initial_log_std)
 
     def forward(
         self,
@@ -81,8 +99,11 @@ class GaussianPolicy(Policy):
     def dist_from_obs(self, obs: torch.Tensor) -> Normal:
         feature = self.backbone(obs)
         action_mu = self.mu(feature)
-        action_std = torch.exp(self.log_std)
-        return Normal(action_mu, action_std.expand_as(action_mu))
+        if self.state_dependent_std:
+            log_std = self.log_std_head(feature).clamp(*self._log_std_bounds)
+        else:
+            log_std = self.log_std.expand_as(action_mu)
+        return Normal(action_mu, torch.exp(log_std))
 
     def evaluate_log_prob(self, obs: torch.Tensor, act: torch.Tensor) -> torch.Tensor:
         """Evaluate the log probability of the action.
@@ -111,6 +132,9 @@ class GaussianPolicy(Policy):
 
     @property
     def action_std(self) -> torch.Tensor:
+        """Per-dim std; only defined for a state-independent std (use dist_from_obs otherwise)."""
+        if self.state_dependent_std:
+            raise AttributeError("action_std depends on the state; use dist_from_obs(obs).stddev")
         return self.log_std.exp()
 
 

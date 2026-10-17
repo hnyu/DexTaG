@@ -2,7 +2,7 @@ from typing import Literal
 
 import genesis as gs
 from gs_schemas.base_types import genesis_pydantic_config
-from pydantic import BaseModel, model_validator
+from pydantic import BaseModel, PositiveInt, model_validator
 
 from gs_env.sim.robots.config.schema import ManipulatorRobotArgs
 from gs_env.sim.scenes.config.schema import SceneArgs
@@ -136,6 +136,10 @@ class SingleHandRetargetingEnvArgs(EnvArgs):
     split_seed: int = 0
     trajectory_augmentation: TrajectoryAugmentationConfig = TrajectoryAugmentationConfig()
     trajectory_playback_hz: float = 60.0  # Resample trajectories to this playback rate (Hz) if different from original 60 Hz
+    # Training resets start each episode at a frame drawn uniformly from
+    # [0, randomize_starting_step_before - 1] of its reference (1 = always the first frame).
+    # Eval always starts at the first frame.
+    randomize_starting_step_before: PositiveInt = 1
     # Re-express action_proprio_history_flat in the current wrist frame at every step (world-frame
     # quantities of past steps are measured from the current wrist pose). Use with the *_wf terms.
     wrist_frame_obs: bool = False

@@ -947,7 +947,8 @@ class SingleHandRetargetingEnvTactileMap(BaseEnv):
         self._teacher_obs_delay_queue: torch.Tensor | None = None
 
     def reset_idx(self, envs_idx: torch.IntTensor) -> None:
-        """Reset the given environments to the first frame of their trajectory.
+        """Reset the given environments to the start frame of their trajectory (the first frame,
+        or a random one in training when randomize_starting_step_before > 1).
 
         Training samples a new reference trajectory (with a fresh augmentation, and
         initial-pose noise on the object if configured); eval advances each env to the
@@ -983,11 +984,16 @@ class SingleHandRetargetingEnvTactileMap(BaseEnv):
             # Training: sample a new reference trajectory (and augmentation) for every reset
             self._sample_references(envs_idx)
 
-        # Always start from beginning of trajectory
+        # Start frame: uniform in [0, randomize_starting_step_before - 1] in training, else 0.
+        # Capped at traj_len - 5 so the episode doesn't count as succeeded on its first step
+        # (success fires once progress_buf + 4 >= traj_len, see get_terminated).
         seq_idx = torch.zeros(num_reset, dtype=torch.long, device=self._device)
+        start_before = self._args.randomize_starting_step_before
+        if not self._eval_mode and start_before > 1:
+            high = torch.clamp(self.env_traj_lengths[envs_idx] - 4, min=1, max=start_before)
+            seq_idx = (torch.rand(num_reset, device=self._device) * high).long()
 
-
-        # Get DOF positions / wrist pose from the first trajectory frame
+        # Get DOF positions / wrist pose from the start frame
         dof_pos = self._traj_data["dof_pos"][envs_idx, seq_idx]  # (num_reset, hand_dof_dim)
         dof_vel = self._traj_data["dof_vel"][envs_idx, seq_idx]  # (num_reset, hand_dof_dim)
 

@@ -138,11 +138,13 @@ class BC(BaseAlgo):
             device=self.device,
         )
         print(f"Teacher policy backbone: {teacher_backbone}")
+        teacher_ckpt = torch.load(teacher_path, map_location=self.device)
         self._teacher = GaussianPolicy(
             policy_backbone=teacher_backbone,
             action_dim=self._action_dim,
+            # Match the teacher's std parameterization (fixed per-dim vs a std head)
+            state_dependent_std="log_std_head.weight" in teacher_ckpt["model_state_dict"],
         ).to(self.device)
-        teacher_ckpt = torch.load(teacher_path, map_location=self.device)
         self._teacher.load_state_dict(teacher_ckpt["model_state_dict"])
         self._teacher.eval()
         self._teacher_iter = int(teacher_ckpt["iter"])

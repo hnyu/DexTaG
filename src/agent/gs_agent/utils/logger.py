@@ -270,10 +270,7 @@ class WandbOutputFormat(KVWriter):
     ):
         if log_dir is not None:
             os.environ["WANDB_DIR"] = log_dir
-        # Pre-generate the run id so it can be appended to the run name (exp names repeat across runs)
-        run_id = wandb.util.generate_id()
-        name = f"{exp_name}_{run_id}" if exp_name is not None else None
-        wandb.init(project=project, entity=entity, config=config, mode=mode, name=name, id=run_id)
+        wandb.init(project=project, entity=entity, config=config, mode=mode, name=exp_name)
         self.run = wandb.run
 
     def write(
