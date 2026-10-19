@@ -2,10 +2,11 @@
 
 #--resume_checkpoint=latest
 
-ACT_EMA=0.5
+ACT_EMA=0.2
 
-TIME=$(date +%Y%m%d_%H%M%S)
-EXP_NAME=marker_pen_ema${ACT_EMA}_noguide_start100_r0.01-${TIME}
+# Random 6-digit run id so repeated runs of the same config get distinct exp names
+RUN_ID=$(LC_ALL=C tr -dc '0-9' </dev/urandom | head -c 6)
+EXP_NAME=marker_pen_ema${ACT_EMA}_noguide_mass0.01_r0.01_ft0.5-${RUN_ID}
 
 cd "$(dirname "$0")"
 
@@ -18,4 +19,6 @@ uv run python scripts/policy/run_ppo_single_hand_retargeting.py \
     --env.robot_args.action_ema=${ACT_EMA} \
     --runner.total_iterations=60000 \
     --algo.reward_scale=0.01 \
-    --env.randomize_starting_step_before=100 \
+    --env.object_config.mass=0.01 \
+    --reward_args.FingertipPositionTrackingReward.scale=25 \
+    --reward_args.FingertipRotationTrackingReward.scale=17.5 \

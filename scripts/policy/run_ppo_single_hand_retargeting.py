@@ -29,7 +29,13 @@ from gs_agent.utils.logger import configure as logger_configure
 from gs_agent.utils.policy_loader import load_latest_model
 from gs_agent.wrappers.gs_env_wrapper import GenesisEnvWrapper
 from gs_env.sim.envs.config.registry import EnvArgsRegistry, OBJECT_REGISTRY
-from utils import apply_overrides_generic, config_to_yaml, seed_everything, snapshot_code
+from utils import (
+    apply_overrides_generic,
+    config_to_yaml,
+    seed_everything,
+    snapshot_code,
+    yaml_to_config,
+)
 
 
 # PPO config (network input layout) for each env entry; PPO_HAND_IMITATOR_TACTILE_MAP_XARM otherwise
@@ -150,6 +156,25 @@ def annotate_frame(frame: np.ndarray, lines: list[str], color: tuple[int, int, i
     return frame
 
 
+def find_eval_run_dir(exp_name: str) -> Path:
+    """Most recent run folder under logs/<exp_name>/ that contains a checkpoint."""
+    log_pattern = f"logs/{exp_name}/*"
+    log_dirs = glob.glob(log_pattern)
+    if not log_dirs:
+        raise FileNotFoundError(f"No experiment directories found matching pattern: {log_pattern}")
+
+    log_dirs.sort(key=lambda x: os.path.getmtime(x), reverse=True)
+    exp_dir = next(
+        (d for d in log_dirs if list(Path(d).glob("checkpoints/*.pt"))),
+        None,
+    )
+    if exp_dir is None:
+        raise FileNotFoundError(
+            f"No run directory with checkpoints found under logs/{exp_name}/"
+        )
+    return Path(exp_dir)
+
+
 def evaluate_policy(
     exp_name: str,
     show_viewer: bool = False,
@@ -191,22 +216,7 @@ def evaluate_policy(
     )
     env_args = env_args.model_copy(update={"robot_args": robot_args})
 
-    # Find the experiment directory without creating a new runner
-    log_pattern = f"logs/{exp_name}/*"
-    log_dirs = glob.glob(log_pattern)
-    if not log_dirs:
-        raise FileNotFoundError(f"No experiment directories found matching pattern: {log_pattern}")
-
-    log_dirs.sort(key=lambda x: os.path.getmtime(x), reverse=True)
-    # Pick the most recent run dir that actually contains a checkpoint.
-    exp_dir = next(
-        (d for d in log_dirs if list(Path(d).glob("checkpoints/*.pt"))),
-        None,
-    )
-    if exp_dir is None:
-        raise FileNotFoundError(
-            f"No run directory with checkpoints found under logs/{exp_name}/"
-        )
+    exp_dir = find_eval_run_dir(exp_name)
     print(f"Loading policy from experiment: {exp_dir}")
 
     # Load checkpoint - either specific one or latest
@@ -707,19 +717,32 @@ def main(
             continue
 
     env_args = EnvArgsRegistry[env_name]
+    algo_cfg = PPO_ARGS_BY_ENV.get(env_name, PPO_HAND_IMITATOR_TACTILE_MAP_XARM)
 
-    # Apply object config before env overrides so --env.* can still override
+    # Eval starts from the configs saved in the evaluated run's folder (so it matches training);
+    # --object_name and --env.* / --algo.* flags below still override them.
+    saved_object_id = None
+    if eval:
+        config_dir = find_eval_run_dir(exp_name) / "configs"
+        env_args = yaml_to_config(config_dir / "env_args.yaml", type(env_args))
+        algo_cfg = yaml_to_config(config_dir / "algo_cfg.yaml", type(algo_cfg))
+        saved_object_id = env_args.object_config.object_id if env_args.object_config else None
+        print(f"Eval: loaded saved env/algo configs from {config_dir}")
+
+    # Apply object config before env overrides so --env.* can still override. A saved config for
+    # the same object is kept as is (it already holds that object's config plus any training-time
+    # --env.object_config.* overrides, e.g. the mass).
     if object_name is not None:
         if object_name not in OBJECT_REGISTRY:
             raise ValueError(f"Unknown object '{object_name}'. Available: {list(OBJECT_REGISTRY.keys())}")
-        env_args = env_args.model_copy(update={"object_config": OBJECT_REGISTRY[object_name]})
-        print(f"Using object config: {object_name}")
+        if OBJECT_REGISTRY[object_name].object_id == saved_object_id:
+            print(f"Using saved object config ({object_name})")
+        else:
+            env_args = env_args.model_copy(update={"object_config": OBJECT_REGISTRY[object_name]})
+            print(f"Using object config: {object_name}")
 
     env_args = apply_overrides_generic(env_args, env_overrides, prefixes=("cfgs.", "env."))
-
-    algo_cfg = apply_overrides_generic(
-        PPO_ARGS_BY_ENV.get(env_name, PPO_HAND_IMITATOR_TACTILE_MAP_XARM), algo_overrides, prefixes=("cfgs.", "algo.")
-    )
+    algo_cfg = apply_overrides_generic(algo_cfg, algo_overrides, prefixes=("cfgs.", "algo."))
     runner_args = apply_overrides_generic(
         RUNNER_SINGLE_HAND_RETARGETING_MLP, runner_overrides, prefixes=("cfgs.", "runner.")
     )
