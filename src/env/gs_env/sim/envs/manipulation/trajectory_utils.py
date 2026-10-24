@@ -19,6 +19,31 @@ from gs_env.common.utils.maniptrans_util import (
 )
 
 
+def max_object_motion_during_hand_freeze(
+    wrist_positions: np.ndarray, object_positions: np.ndarray, min_frames: int
+) -> float:
+    """Largest object displacement (m) over any hand-tracking freeze in a trajectory.
+
+    A freeze is a run of at least min_frames consecutive frames that repeat the previous wrist
+    position exactly (the hand tracker dropped out and its last sample was held). Shorter repeats
+    are normal: the hand is tracked below the 60 Hz recording rate. Returns 0.0 if there is none.
+
+    wrist_positions: (T, 3); object_positions: (T, 3).
+    """
+    repeated = np.all(wrist_positions[1:] == wrist_positions[:-1], axis=-1)  # frame t+1 repeats t
+    max_motion, t, T = 0.0, 0, len(repeated)
+    while t < T:
+        if not repeated[t]:
+            t += 1
+            continue
+        start = t
+        while t < T and repeated[t]:
+            t += 1
+        if t - start >= min_frames:  # frames start..t all hold the same wrist position
+            max_motion = max(max_motion, float(np.linalg.norm(object_positions[t] - object_positions[start])))
+    return max_motion
+
+
 def pad_and_stack(arrays: list[np.ndarray]) -> np.ndarray:
     """Pad arrays to same length and stack them.
 

@@ -129,6 +129,12 @@ class SingleHandRetargetingEnvArgs(EnvArgs):
     object_guide_force_decay_steps: int = 0  # Number of training steps over which kp/kv decay to 0
     object_guide_force_kp: float = 1.0  # 0.5 seems to be the minimum for pen lifting
     skip_trajectories: list[str] = []  # Trajectory filenames to skip during loading
+    # Skip trajectories with a hand-tracking dropout: the recorded wrist stays exactly constant for
+    # at least tracking_freeze_min_frames frames while the object moves more than
+    # tracking_freeze_max_object_motion meters, so the reference hand leaves the object (and then
+    # jumps to catch up). None disables the filter.
+    tracking_freeze_min_frames: int = 10
+    tracking_freeze_max_object_motion: float | None = 0.02
     # Train/eval split (deterministic, by trajectory ID prefix before "__"):
     train_ratio: float = 1.0
     split_mode: Literal["train", "eval", "all"] = "all"

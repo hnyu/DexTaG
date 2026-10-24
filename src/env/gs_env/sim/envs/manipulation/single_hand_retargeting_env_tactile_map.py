@@ -29,7 +29,7 @@ from gs_env.common.utils.math_utils import (
 )
 from gs_env.common.utils.misc_utils import get_space_dim
 from gs_env.sim.envs.config.schema import SingleHandRetargetingEnvArgs
-from gs_env.sim.envs.manipulation.trajectory_utils import augment_reference_data, pad_and_stack, process_trajectory_data_tactile_map, query_object_sdf, resample_trajectory_lists
+from gs_env.sim.envs.manipulation.trajectory_utils import augment_reference_data, max_object_motion_during_hand_freeze, pad_and_stack, process_trajectory_data_tactile_map, query_object_sdf, resample_trajectory_lists
 from gs_env.sim.robots.config.schema import CtrlType
 from gs_env.sim.robots.manipulators import XArmWUJIHand
 from gs_env.sim.scenes import FlatScene
@@ -488,6 +488,8 @@ class SingleHandRetargetingEnvTactileMap(BaseEnv):
         n_skipped_split: int = 0
         n_skipped_obj: int = 0
         n_skipped_list: int = 0
+        n_skipped_freeze: int = 0
+        freeze_max_motion = self._args.tracking_freeze_max_object_motion
 
         for traj_idx, traj_file in enumerate(traj_files):
             with open(traj_file, "rb") as f:
@@ -501,6 +503,17 @@ class SingleHandRetargetingEnvTactileMap(BaseEnv):
                 print(f"  - SKIPPED (matches skip pattern): {traj_file.name}")
                 n_skipped_list += 1
                 continue
+
+            if freeze_max_motion is not None:
+                motion = max_object_motion_during_hand_freeze(
+                    data["hand_trajectory"]["wrist_positions"],
+                    data["object_trajectory"]["pose_matrices"][:, :3, 3],
+                    self._args.tracking_freeze_min_frames,
+                )
+                if motion > freeze_max_motion:
+                    print(f"  - SKIPPED (hand tracking froze while the object moved {100 * motion:.1f} cm): {traj_file.name}")
+                    n_skipped_freeze += 1
+                    continue
 
             # Train/eval split filter
             if split_mode != "all":
@@ -543,6 +556,7 @@ class SingleHandRetargetingEnvTactileMap(BaseEnv):
         print(
             f"\nTrajectory split summary: kept={len(all_demo_data)}, "
             f"skipped_obj_id={n_skipped_obj}, skipped_skip_list={n_skipped_list}, "
+            f"skipped_tracking_freeze={n_skipped_freeze}, "
             f"skipped_split={n_skipped_split} "
             f"(split_mode={split_mode}, train_ratio={train_ratio}, "
             f"split_seed={self._args.split_seed})"
