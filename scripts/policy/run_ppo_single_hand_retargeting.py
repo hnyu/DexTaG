@@ -527,6 +527,15 @@ def evaluate_policy(
                             f"Reached {num_runs_per_traj} iterations "
                             f"({num_runs_per_traj} runs per trajectory). Stopping."
                         )
+                        # Same definitions as PPO's rollout metrics: episode-level success rate,
+                        # summed (unscaled) env reward per episode, and episode length. Eval runs
+                        # a single env, so PPO's per-env length average reduces to a plain mean.
+                        print(f"\n{'='*80}")
+                        print(f"Final eval metrics (n={len(all_lengths)} episodes)")
+                        print(f"  rollout/success_rate: {np.mean(all_success):.4f}")
+                        print(f"  rollout/mean_reward:  {np.mean(all_rewards):.4f}")
+                        print(f"  rollout/mean_length:  {np.mean(all_lengths):.2f}")
+                        print(f"{'='*80}\n")
                         return
 
 
